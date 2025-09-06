@@ -16,7 +16,8 @@
     "@whiskeysockets/baileys": "^6.7.19",
     "axios": "^1.11.0",
     "express": "^5.1.0",
-    "pino": "^9.9.4"
+    "pino": "^9.9.4",
+    "qrcode": "^1.5.4"
   },
   "engines": {
     "node": "22.x"
