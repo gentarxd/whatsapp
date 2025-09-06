@@ -4,6 +4,7 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
+    "start": "node index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -15,7 +16,9 @@
     "@whiskeysockets/baileys": "^6.7.19",
     "axios": "^1.11.0",
     "express": "^5.1.0",
-    "fs": "^0.0.1-security",
     "pino": "^9.9.4"
+  },
+  "engines": {
+    "node": "22.x"
   }
 }
