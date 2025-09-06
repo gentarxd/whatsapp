@@ -2,6 +2,7 @@ import express from "express";
 import makeWASocket, { DisconnectReason, useMultiFileAuthState } from "@whiskeysockets/baileys";
 import axios from "axios";
 import fs from "fs";
+import QRCode from "qrcode";
 
 const app = express();
 app.use(express.json());
@@ -12,11 +13,10 @@ const sessionStatus = {};
 const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.API_KEY || null;
 
+// ⚡ إنشاء أو تشغيل session جديد
 async function startSock(sessionId) {
   const authFolder = `./auth_info/${sessionId}`;
-  if (!fs.existsSync(authFolder)) {
-    fs.mkdirSync(authFolder, { recursive: true });
-  }
+  if (!fs.existsSync(authFolder)) fs.mkdirSync(authFolder, { recursive: true });
 
   const { state, saveCreds } = await useMultiFileAuthState(authFolder);
 
@@ -46,7 +46,6 @@ async function startSock(sessionId) {
       console.log(`Session ${sessionId} closed`);
 
       const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
-
       if (shouldReconnect) {
         console.log(`Reconnecting ${sessionId}...`);
         startSock(sessionId);
@@ -58,6 +57,7 @@ async function startSock(sessionId) {
   return sock;
 }
 
+// 🛡 Middleware للتحقق من API Key
 function requireApiKey(req, res, next) {
   if (API_KEY) {
     const header = req.headers["x-api-key"];
@@ -75,11 +75,25 @@ app.post("/create-session", requireApiKey, async (req, res) => {
   res.json({ message: "session created", sessionId });
 });
 
-// ✅ Get QR Code
-app.get("/get-qr/:sessionId", requireApiKey, (req, res) => {
+// ✅ Get QR Code as image
+app.get("/get-qr/:sessionId", requireApiKey, async (req, res) => {
   const { sessionId } = req.params;
-  if (!qrCodes[sessionId]) return res.status(404).json({ error: "No QR available" });
-  res.json({ qr: qrCodes[sessionId] });
+  const qr = qrCodes[sessionId];
+
+  if (!qr) return res.status(404).json({ error: "No QR available" });
+
+  try {
+    // تحويل الـ QR string لصورة PNG مباشرة
+    const imgBuffer = await QRCode.toBuffer(qr, { type: "png" });
+
+    res.writeHead(200, {
+      "Content-Type": "image/png",
+      "Content-Length": imgBuffer.length,
+    });
+    res.end(imgBuffer);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ✅ Send message
@@ -110,4 +124,10 @@ app.post("/send-message", requireApiKey, async (req, res) => {
   }
 });
 
+// ✅ Health check
+app.get('/', (req, res) => {
+  res.send('Server is running!');
+});
+
+// Start server
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
