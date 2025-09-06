@@ -95,13 +95,20 @@ app.get("/get-qr/:sessionId", requireApiKey, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
-// ✅ Send message
 app.post("/send-message", requireApiKey, async (req, res) => {
   const { sessionId, phone, text, imageUrl } = req.body;
 
-  if (!sessionId || !phone) return res.status(400).json({ error: "sessionId and phone required" });
-  if (!sessions[sessionId]) return res.status(400).json({ error: "Invalid session ID" });
+  if (!sessionId || !phone) 
+    return res.status(400).json({ error: "sessionId and phone required" });
+
+  const sock = sessions[sessionId];
+  if (!sock) 
+    return res.status(400).json({ error: "Invalid session ID" });
+
+  // نتأكد إن session مفتوح
+  if (sessionStatus[sessionId] !== "open") {
+    return res.status(400).json({ error: "Session not connected yet" });
+  }
 
   try {
     const jid = `${phone}@s.whatsapp.net`;
@@ -110,12 +117,9 @@ app.post("/send-message", requireApiKey, async (req, res) => {
       const response = await axios.get(imageUrl, { responseType: "arraybuffer" });
       const buffer = Buffer.from(response.data, "binary");
 
-      await sessions[sessionId].sendMessage(jid, {
-        image: buffer,
-        caption: text || "",
-      });
+      await sock.sendMessage(jid, { image: buffer, caption: text || "" });
     } else {
-      await sessions[sessionId].sendMessage(jid, { text });
+      await sock.sendMessage(jid, { text });
     }
 
     res.json({ status: "sent", phone });
@@ -123,11 +127,3 @@ app.post("/send-message", requireApiKey, async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
-
-// ✅ Health check
-app.get('/', (req, res) => {
-  res.send('Server is running!');
-});
-
-// Start server
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
