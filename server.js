@@ -13,10 +13,12 @@ const sessionStatus = {};
 const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.API_KEY || null;
 
-// ⚡ إنشاء أو تشغيل session جديد
+// إنشاء الـ WhatsApp socket
 async function startSock(sessionId) {
   const authFolder = `./auth_info/${sessionId}`;
-  if (!fs.existsSync(authFolder)) fs.mkdirSync(authFolder, { recursive: true });
+  if (!fs.existsSync(authFolder)) {
+    fs.mkdirSync(authFolder, { recursive: true });
+  }
 
   const { state, saveCreds } = await useMultiFileAuthState(authFolder);
 
@@ -57,7 +59,7 @@ async function startSock(sessionId) {
   return sock;
 }
 
-// 🛡 Middleware للتحقق من API Key
+// تحقق من API key إذا موجود
 function requireApiKey(req, res, next) {
   if (API_KEY) {
     const header = req.headers["x-api-key"];
@@ -75,26 +77,33 @@ app.post("/create-session", requireApiKey, async (req, res) => {
   res.json({ message: "session created", sessionId });
 });
 
-// ✅ Get QR Code as image
+// ✅ Get QR Code as image or confirmation if scanned
 app.get("/get-qr/:sessionId", requireApiKey, async (req, res) => {
   const { sessionId } = req.params;
   const qr = qrCodes[sessionId];
 
+  if (!qr && sessionStatus[sessionId] === "open") {
+    // QR تم مسحه بالفعل والـ session شغّال
+    return res.json({ status: "success", message: "QR already scanned, session active" });
+  }
+
   if (!qr) return res.status(404).json({ error: "No QR available" });
 
   try {
-    // تحويل الـ QR string لصورة PNG مباشرة
-    const imgBuffer = await QRCode.toBuffer(qr, { type: "png" });
+    const qrImage = await QRCode.toDataURL(qr);
+    const img = Buffer.from(qrImage.split(",")[1], "base64");
 
     res.writeHead(200, {
       "Content-Type": "image/png",
-      "Content-Length": imgBuffer.length,
+      "Content-Length": img.length,
     });
-    res.end(imgBuffer);
+    res.end(img);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ✅ Send message and confirm session ID
 app.post("/send-message", requireApiKey, async (req, res) => {
   const { sessionId, phone, text, imageUrl } = req.body;
 
@@ -104,11 +113,6 @@ app.post("/send-message", requireApiKey, async (req, res) => {
   const sock = sessions[sessionId];
   if (!sock) 
     return res.status(400).json({ error: "Invalid session ID" });
-
-  // نتأكد إن session مفتوح
-  if (sessionStatus[sessionId] !== "open") {
-    return res.status(400).json({ error: "Session not connected yet" });
-  }
 
   try {
     const jid = `${phone}@s.whatsapp.net`;
@@ -122,8 +126,20 @@ app.post("/send-message", requireApiKey, async (req, res) => {
       await sock.sendMessage(jid, { text });
     }
 
-    res.json({ status: "sent", phone });
+    res.json({ 
+      status: "success", 
+      message: "Session ID valid, message sent successfully", 
+      phone 
+    });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
+
+// ✅ Health check
+app.get('/', (req, res) => {
+  res.send('Server is running!');
+});
+
+// Start server
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
