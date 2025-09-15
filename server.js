@@ -46,6 +46,7 @@ async function connectToWhatsApp(sessionId) {
   });
 }
 
+// API: Create Session
 app.post("/connect", async (req, res) => {
   const { sessionId } = req.body;
   if (!sessionId) return res.status(400).json({ error: "sessionId is required" });
@@ -58,6 +59,7 @@ app.post("/connect", async (req, res) => {
   res.json({ message: `Session ${sessionId} is being initialized.` });
 });
 
+// API: Get Session Status
 app.get("/status/:sessionId", (req, res) => {
   const { sessionId } = req.params;
   const session = sessions[sessionId];
@@ -70,40 +72,28 @@ app.get("/status/:sessionId", (req, res) => {
   });
 });
 
-// ✅ Get QR as real PNG image
-// ✅ Get QR as real PNG image
-
-app.get("/get-qr/:sessionId", requireApikey, async (req, res) => {
+// API: Get QR as PNG
+app.get("/get-qr/:sessionId", async (req, res) => {
   const { sessionId } = req.params;
-  const qr = qrCodes[sessionId];
+  const session = sessions[sessionId];
 
-  // لو الـ QR اتمسح بالفعل (السيشن مفتوح)
-  if (qr && sessionStatus[sessionId] === "open") {
-    return res.json({
-      status: "success",
-      message: "QR already scanned",
-    });
-  }
-
-  if (!qr) {
-    return res.status(404).json({ error: "No QR available" });
-  }
+  if (!session) return res.status(404).json({ error: "Session not found" });
+  if (!session.qr) return res.status(404).json({ error: "No QR available" });
 
   try {
-    // تحويل QR string لصورة PNG
-    const imgBuffer = await QRCode.toBuffer(qr, { type: "png" });
+    const imgBuffer = await QRCode.toBuffer(session.qr, { type: "png" });
 
     res.writeHead(200, {
       "Content-Type": "image/png",
       "Content-Length": imgBuffer.length,
     });
-
-    res.end(imgBuffer); // نرجع الصورة كـ raw PNG
+    res.end(imgBuffer);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
+// API: Send Message
 app.post("/send-message", async (req, res) => {
   const { sessionId, number, message } = req.body;
 
