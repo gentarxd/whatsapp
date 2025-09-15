@@ -1,5 +1,6 @@
 import express from "express";
 import makeWASocket, { useMultiFileAuthState, fetchLatestBaileysVersion, DisconnectReason } from "@whiskeysockets/baileys";
+import QRCode from "qrcode";
 
 const app = express();
 app.use(express.json());
@@ -14,7 +15,7 @@ async function connectToWhatsApp(sessionId) {
   const sock = makeWASocket({
     version,
     auth: state,
-    printQRInTerminal: false, // هنطبع الـ QR في الـ API مش التيرمنال
+    printQRInTerminal: false,
   });
 
   // حفظ البيانات
@@ -26,18 +27,18 @@ async function connectToWhatsApp(sessionId) {
 
     if (qr) {
       console.log(`🔑 QR for ${sessionId}:`, qr);
-      sessions[sessionId].qr = qr; // نخزن الـ QR عشان نرجعه للـ API
+      sessions[sessionId].qr = qr; // نخزن الـ QR
     }
 
     if (connection === "open") {
       console.log(`✅ Session ${sessionId} connected`);
       sessions[sessionId].sock = sock;
       sessions[sessionId].connected = true;
+      sessions[sessionId].qr = null; // مسح الـ QR بعد الاتصال
     } else if (connection === "close") {
       console.log(`❌ Session ${sessionId} closed`);
       sessions[sessionId].connected = false;
 
-      // لو الاتصال قفل بسبب logout → نمسح السيشن
       const shouldReconnect =
         lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
 
@@ -72,6 +73,21 @@ app.get("/status/:sessionId", (req, res) => {
     connected: session.connected || false,
     qr: session.qr || null,
   });
+});
+
+// API: Get QR as Image
+app.get("/get-qr/:sessionId", async (req, res) => {
+  const { sessionId } = req.params;
+  const session = sessions[sessionId];
+
+  if (!session || !session.qr) return res.status(404).send("QR not found");
+
+  try {
+    const qrImage = await QRCode.toDataURL(session.qr);
+    res.send(`<img src="${qrImage}" />`);
+  } catch (err) {
+    res.status(500).send("Failed to generate QR");
+  }
 });
 
 // API: Send Message
