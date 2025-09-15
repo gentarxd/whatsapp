@@ -71,22 +71,25 @@ app.get("/status/:sessionId", (req, res) => {
 });
 
 // ✅ Get QR as real PNG image
+// ✅ Get QR as real PNG image
 app.get("/get-qr/:sessionId", async (req, res) => {
   const { sessionId } = req.params;
   const session = sessions[sessionId];
 
-  if (!session || !session.qr) return res.status(404).send("QR not found");
+  if (!session || !session.qr) {
+    return res.status(404).send("QR not found");
+  }
 
   try {
+    // نحول النص (اللي شكله زي 2@BWEWk4...) لصورة QR
     const qrBuffer = await QRCode.toBuffer(session.qr, {
       type: "png",
       width: 300,
       errorCorrectionLevel: "H",
     });
 
-    res.setHeader("Content-Type", "image/png");
-    res.setHeader("Content-Length", qrBuffer.length);
-    return res.end(qrBuffer); // نرجع الصورة الخام
+    res.type("png");       // نقول للمتصفح إن ده PNG
+    res.send(qrBuffer);    // نبعت الصورة كـ raw bytes
   } catch (err) {
     console.error("QR error:", err);
     res.status(500).send("Failed to generate QR");
