@@ -72,7 +72,6 @@ app.get("/status/:sessionId", (req, res) => {
 
 // ✅ Get QR as real PNG image
 // ✅ Get QR as real PNG image
-import QRCode from "qrcode";
 
 app.get("/get-qr/:sessionId", requireApikey, async (req, res) => {
   const { sessionId } = req.params;
