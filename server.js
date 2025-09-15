@@ -13,12 +13,22 @@ const sessionStatus = {};
 const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.API_KEY || null;
 
-// إنشاء الـ WhatsApp socket
-async function startSock(sessionId) {
-  const authFolder = `./auth_info/${sessionId}`;
-  if (!fs.existsSync(authFolder)) {
-    fs.mkdirSync(authFolder, { recursive: true });
+// Base path for storing sessions (persistent in Render)
+const baseAuthPath = process.env.SESSION_DIR || "./auth_info";
+
+// --- Helper: API key check ---
+function requireApiKey(req, res, next) {
+  if (API_KEY) {
+    const header = req.headers["x-api-key"];
+    if (header !== API_KEY) return res.status(401).json({ error: "unauthorized" });
   }
+  next();
+}
+
+// --- Start socket ---
+async function startSock(sessionId) {
+  const authFolder = `${baseAuthPath}/${sessionId}`;
+  if (!fs.existsSync(authFolder)) fs.mkdirSync(authFolder, { recursive: true });
 
   const { state, saveCreds } = await useMultiFileAuthState(authFolder);
 
@@ -59,31 +69,36 @@ async function startSock(sessionId) {
   return sock;
 }
 
-// تحقق من API key إذا موجود
-function requireApiKey(req, res, next) {
-  if (API_KEY) {
-    const header = req.headers["x-api-key"];
-    if (header !== API_KEY) return res.status(401).json({ error: "unauthorized" });
-  }
-  next();
-}
+// --- API Routes ---
 
-// ✅ Create session
+// ✅ Create new session (always generates QR if new)
 app.post("/create-session", requireApiKey, async (req, res) => {
   const { sessionId } = req.body;
   if (!sessionId) return res.status(400).json({ error: "sessionId required" });
 
   await startSock(sessionId);
-  res.json({ message: "session created", sessionId });
+  res.json({ message: "Session created (scan QR if required)", sessionId });
 });
 
-// ✅ Get QR Code as image or confirmation if scanned
+// ✅ Connect existing session (reuse saved creds)
+app.post("/connect-session", requireApiKey, async (req, res) => {
+  const { sessionId } = req.body;
+  if (!sessionId) return res.status(400).json({ error: "sessionId required" });
+
+  if (sessions[sessionId]) {
+    return res.json({ message: "Session already active", sessionId });
+  }
+
+  await startSock(sessionId);
+  res.json({ message: "Session connected (or QR needed if expired)", sessionId });
+});
+
+// ✅ Get QR code
 app.get("/get-qr/:sessionId", requireApiKey, async (req, res) => {
   const { sessionId } = req.params;
   const qr = qrCodes[sessionId];
 
   if (!qr && sessionStatus[sessionId] === "open") {
-    // QR تم مسحه بالفعل والـ session شغّال
     return res.json({ status: "success", message: "QR already scanned, session active" });
   }
 
@@ -103,7 +118,33 @@ app.get("/get-qr/:sessionId", requireApiKey, async (req, res) => {
   }
 });
 
-// ✅ Send message and confirm session ID
+// ✅ Check session status
+app.get("/session-status/:sessionId", requireApiKey, (req, res) => {
+  const { sessionId } = req.params;
+  const status = sessionStatus[sessionId] || "not found";
+  res.json({ sessionId, status });
+});
+
+// ✅ Delete session
+app.delete("/delete-session/:sessionId", requireApiKey, (req, res) => {
+  const { sessionId } = req.params;
+
+  if (sessions[sessionId]) {
+    delete sessions[sessionId];
+  }
+
+  const authFolder = `${baseAuthPath}/${sessionId}`;
+  if (fs.existsSync(authFolder)) {
+    fs.rmSync(authFolder, { recursive: true, force: true });
+  }
+
+  delete qrCodes[sessionId];
+  delete sessionStatus[sessionId];
+
+  res.json({ message: "Session deleted", sessionId });
+});
+
+// ✅ Send message
 app.post("/send-message", requireApiKey, async (req, res) => {
   const { sessionId, phone, text, imageUrl } = req.body;
 
@@ -128,7 +169,7 @@ app.post("/send-message", requireApiKey, async (req, res) => {
 
     res.json({ 
       status: "success", 
-      message: "Session ID valid, message sent successfully", 
+      message: "Message sent successfully", 
       phone 
     });
   } catch (e) {
