@@ -72,27 +72,36 @@ app.get("/status/:sessionId", (req, res) => {
 
 // ✅ Get QR as real PNG image
 // ✅ Get QR as real PNG image
-app.get("/get-qr/:sessionId", async (req, res) => {
-  const { sessionId } = req.params;
-  const session = sessions[sessionId];
+import QRCode from "qrcode";
 
-  if (!session || !session.qr) {
-    return res.status(404).send("QR not found");
+app.get("/get-qr/:sessionId", requireApikey, async (req, res) => {
+  const { sessionId } = req.params;
+  const qr = qrCodes[sessionId];
+
+  // لو الـ QR اتمسح بالفعل (السيشن مفتوح)
+  if (qr && sessionStatus[sessionId] === "open") {
+    return res.json({
+      status: "success",
+      message: "QR already scanned",
+    });
+  }
+
+  if (!qr) {
+    return res.status(404).json({ error: "No QR available" });
   }
 
   try {
-    // نحول النص (اللي شكله زي 2@BWEWk4...) لصورة QR
-    const qrBuffer = await QRCode.toBuffer(session.qr, {
-      type: "png",
-      width: 300,
-      errorCorrectionLevel: "H",
+    // تحويل QR string لصورة PNG
+    const imgBuffer = await QRCode.toBuffer(qr, { type: "png" });
+
+    res.writeHead(200, {
+      "Content-Type": "image/png",
+      "Content-Length": imgBuffer.length,
     });
 
-    res.type("png");       // نقول للمتصفح إن ده PNG
-    res.send(qrBuffer);    // نبعت الصورة كـ raw bytes
+    res.end(imgBuffer); // نرجع الصورة كـ raw PNG
   } catch (err) {
-    console.error("QR error:", err);
-    res.status(500).send("Failed to generate QR");
+    res.status(500).json({ error: err.message });
   }
 });
 
