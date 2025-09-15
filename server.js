@@ -9,10 +9,15 @@ app.use(express.json());
 const sessions = {};
 
 async function connectToWhatsApp(sessionId) {
-  const authFolder = `./sessions/${sessionId}`;
+  const DISK_PATH = process.env.SESSION_PATH || "./sessions"; 
+  const authFolder = `${DISK_PATH}/${sessionId}`;
+
   if (!fs.existsSync(authFolder)) {
     fs.mkdirSync(authFolder, { recursive: true });
   }
+  // باقي الكود زي ما هو...
+}
+
 
   const { state, saveCreds } = await useMultiFileAuthState(authFolder);
   const { version } = await fetchLatestBaileysVersion();
