@@ -75,8 +75,7 @@ app.get("/status/:sessionId", (req, res) => {
   });
 });
 
-// API: Get QR as Image
-// API: Get QR as PNG
+
 app.get("/get-qr/:sessionId", async (req, res) => {
   const { sessionId } = req.params;
   const session = sessions[sessionId];
@@ -84,12 +83,20 @@ app.get("/get-qr/:sessionId", async (req, res) => {
   if (!session || !session.qr) return res.status(404).send("QR not found");
 
   try {
-    // نحول الـ QR ل Buffer بدل data URL
-    const qrBuffer = await QRCode.toBuffer(session.qr, { type: 'png' });
-    
-    res.setHeader('Content-Type', 'image/png');
-    res.send(qrBuffer);
+    // نحول الـ QR string لصورة PNG
+    const qrBuffer = await QRCode.toBuffer(session.qr, {
+      type: 'png',       // PNG format
+      width: 300,        // حجم الصورة
+      errorCorrectionLevel: 'H', // أفضل تصحيح للأخطاء
+    });
+
+    res.writeHead(200, {
+      'Content-Type': 'image/png',
+      'Content-Length': qrBuffer.length,
+    });
+    res.end(qrBuffer); // نرسل الصورة مباشرة
   } catch (err) {
+    console.error(err);
     res.status(500).send("Failed to generate QR");
   }
 });
