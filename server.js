@@ -5,9 +5,8 @@ import QRCode from "qrcode";
 const app = express();
 app.use(express.json());
 
-const sessions = {}; // نخزن السيشنز هنا
+const sessions = {};
 
-// Function: Connect Session
 async function connectToWhatsApp(sessionId) {
   const { state, saveCreds } = await useMultiFileAuthState(`./sessions/${sessionId}`);
   const { version } = await fetchLatestBaileysVersion();
@@ -18,23 +17,21 @@ async function connectToWhatsApp(sessionId) {
     printQRInTerminal: false,
   });
 
-  // حفظ البيانات
   sock.ev.on("creds.update", saveCreds);
 
-  // متابعة الاتصال
   sock.ev.on("connection.update", (update) => {
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
       console.log(`🔑 QR for ${sessionId}:`, qr);
-      sessions[sessionId].qr = qr; // نخزن الـ QR
+      sessions[sessionId].qr = qr;
     }
 
     if (connection === "open") {
       console.log(`✅ Session ${sessionId} connected`);
       sessions[sessionId].sock = sock;
       sessions[sessionId].connected = true;
-      sessions[sessionId].qr = null; // مسح الـ QR بعد الاتصال
+      sessions[sessionId].qr = null;
     } else if (connection === "close") {
       console.log(`❌ Session ${sessionId} closed`);
       sessions[sessionId].connected = false;
@@ -49,7 +46,6 @@ async function connectToWhatsApp(sessionId) {
   });
 }
 
-// API: Create Session
 app.post("/connect", async (req, res) => {
   const { sessionId } = req.body;
   if (!sessionId) return res.status(400).json({ error: "sessionId is required" });
@@ -62,7 +58,6 @@ app.post("/connect", async (req, res) => {
   res.json({ message: `Session ${sessionId} is being initialized.` });
 });
 
-// API: Get Session Status
 app.get("/status/:sessionId", (req, res) => {
   const { sessionId } = req.params;
   const session = sessions[sessionId];
@@ -75,7 +70,7 @@ app.get("/status/:sessionId", (req, res) => {
   });
 });
 
-
+// ✅ Get QR as real PNG image
 app.get("/get-qr/:sessionId", async (req, res) => {
   const { sessionId } = req.params;
   const session = sessions[sessionId];
@@ -83,25 +78,21 @@ app.get("/get-qr/:sessionId", async (req, res) => {
   if (!session || !session.qr) return res.status(404).send("QR not found");
 
   try {
-    // نحول الـ QR string لصورة PNG
     const qrBuffer = await QRCode.toBuffer(session.qr, {
-      type: 'png',       // PNG format
-      width: 300,        // حجم الصورة
-      errorCorrectionLevel: 'H', // أفضل تصحيح للأخطاء
+      type: "png",
+      width: 300,
+      errorCorrectionLevel: "H",
     });
 
-    res.writeHead(200, {
-      'Content-Type': 'image/png',
-      'Content-Length': qrBuffer.length,
-    });
-    res.end(qrBuffer); // نرسل الصورة مباشرة
+    res.setHeader("Content-Type", "image/png");
+    res.setHeader("Content-Length", qrBuffer.length);
+    return res.end(qrBuffer); // نرجع الصورة الخام
   } catch (err) {
-    console.error(err);
+    console.error("QR error:", err);
     res.status(500).send("Failed to generate QR");
   }
 });
 
-// API: Send Message
 app.post("/send-message", async (req, res) => {
   const { sessionId, number, message } = req.body;
 
