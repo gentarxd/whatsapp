@@ -73,47 +73,37 @@ app.get("/status/:sessionId", (req, res) => {
 });
 
 // API: Get QR as PNG
-app.get("/get-qr/:sessionId", async (req, res) => {
+// Endpoint: صفحة HTML تعرض QR وتحدث تلقائياً
+app.get("/qr-page/:sessionId", async (req, res) => {
   const { sessionId } = req.params;
   const session = sessions[sessionId];
 
-  if (!session) return res.status(404).json({ error: "Session not found" });
-  if (!session.qr) return res.status(404).json({ error: "No QR available" });
+  if (!session) return res.status(404).send("Session not found");
 
-  try {
-    const imgBuffer = await QRCode.toBuffer(session.qr, { type: "png" });
-
-    res.writeHead(200, {
-      "Content-Type": "image/png",
-      "Content-Length": imgBuffer.length,
-    });
-    res.end(imgBuffer);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// API: Send Message
-app.post("/send-message", async (req, res) => {
-  const { sessionId, number, message } = req.body;
-
-  if (!sessionId || !number || !message) {
-    return res.status(400).json({ error: "sessionId, number, and message are required" });
-  }
-
-  const session = sessions[sessionId];
-  if (!session || !session.connected || !session.sock) {
-    return res.status(400).json({ error: "Session is not connected." });
-  }
-
-  try {
-    const jid = `${number}@s.whatsapp.net`;
-    await session.sock.sendMessage(jid, { text: message });
-    res.json({ success: true });
-  } catch (err) {
-    console.error("Send error:", err);
-    res.status(500).json({ error: "Failed to send message" });
-  }
+  // صفحة HTML بسيطة
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <title>WhatsApp QR</title>
+        <style>
+          body { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; font-family: sans-serif; }
+          img { margin-top: 20px; border: 2px solid #000; }
+        </style>
+      </head>
+      <body>
+        <h1>Scan this QR to connect WhatsApp</h1>
+        <img id="qr" src="/get-qr/${sessionId}" alt="WhatsApp QR" />
+        <script>
+          // تحديث الصورة كل 5 ثواني
+          setInterval(() => {
+            const img = document.getElementById('qr');
+            img.src = '/get-qr/${sessionId}?t=' + new Date().getTime();
+          }, 5000);
+        </script>
+      </body>
+    </html>
+  `);
 });
 
 const PORT = process.env.PORT || 3000;
