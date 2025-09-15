@@ -27,7 +27,7 @@ function requireApiKey(req, res, next) {
 
 // --- Start socket ---
 async function startSock(sessionId) {
-  const authFolder = `${baseAuthPath}/${sessionId}`;
+const authFolder = `${process.env.SESSION_DIR}/${sessionId}`;
   if (!fs.existsSync(authFolder)) fs.mkdirSync(authFolder, { recursive: true });
 
   const { state, saveCreds } = await useMultiFileAuthState(authFolder);
