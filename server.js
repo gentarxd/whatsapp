@@ -76,6 +76,7 @@ app.get("/status/:sessionId", (req, res) => {
 });
 
 // API: Get QR as Image
+// API: Get QR as PNG
 app.get("/get-qr/:sessionId", async (req, res) => {
   const { sessionId } = req.params;
   const session = sessions[sessionId];
@@ -83,8 +84,11 @@ app.get("/get-qr/:sessionId", async (req, res) => {
   if (!session || !session.qr) return res.status(404).send("QR not found");
 
   try {
-    const qrImage = await QRCode.toDataURL(session.qr);
-    res.send(`<img src="${qrImage}" />`);
+    // نحول الـ QR ل Buffer بدل data URL
+    const qrBuffer = await QRCode.toBuffer(session.qr, { type: 'png' });
+    
+    res.setHeader('Content-Type', 'image/png');
+    res.send(qrBuffer);
   } catch (err) {
     res.status(500).send("Failed to generate QR");
   }
