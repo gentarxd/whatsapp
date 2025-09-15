@@ -1,6 +1,7 @@
 import express from "express";
 import makeWASocket, { useMultiFileAuthState, fetchLatestBaileysVersion, DisconnectReason } from "@whiskeysockets/baileys";
 import QRCode from "qrcode";
+import fs from "fs";
 
 const app = express();
 app.use(express.json());
@@ -8,7 +9,12 @@ app.use(express.json());
 const sessions = {};
 
 async function connectToWhatsApp(sessionId) {
-  const { state, saveCreds } = await useMultiFileAuthState(`./sessions/${sessionId}`);
+  const authFolder = `./sessions/${sessionId}`;
+  if (!fs.existsSync(authFolder)) {
+    fs.mkdirSync(authFolder, { recursive: true });
+  }
+
+  const { state, saveCreds } = await useMultiFileAuthState(authFolder);
   const { version } = await fetchLatestBaileysVersion();
 
   const sock = makeWASocket({
@@ -23,7 +29,7 @@ async function connectToWhatsApp(sessionId) {
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
-      console.log(`🔑 QR for ${sessionId}:`, qr);
+      console.log(`🔑 QR generated for ${sessionId}`);
       sessions[sessionId].qr = qr;
     }
 
@@ -40,70 +46,77 @@ async function connectToWhatsApp(sessionId) {
         lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
 
       if (shouldReconnect) {
+        console.log(`🔄 Reconnecting ${sessionId}...`);
         connectToWhatsApp(sessionId);
       }
     }
   });
+
+  sessions[sessionId].sock = sock;
+  return sock;
 }
 
-// API: Create Session
+// ✅ Create / reconnect session
 app.post("/connect", async (req, res) => {
   const { sessionId } = req.body;
   if (!sessionId) return res.status(400).json({ error: "sessionId is required" });
 
   if (!sessions[sessionId]) {
     sessions[sessionId] = { connected: false, qr: null };
+  }
+
+  if (!sessions[sessionId].connected) {
     connectToWhatsApp(sessionId);
   }
 
-  res.json({ message: `Session ${sessionId} is being initialized.` });
+  res.json({ message: `Session ${sessionId} is being initialized/connected.` });
 });
 
-// API: Get Session Status
-app.get("/status/:sessionId", (req, res) => {
+// ✅ Auto-connect if not connected when checking status
+app.get("/status/:sessionId", async (req, res) => {
   const { sessionId } = req.params;
   const session = sessions[sessionId];
   if (!session) return res.status(404).json({ error: "Session not found" });
 
+  if (!session.connected) {
+    console.log(`⚡ Auto-reconnecting ${sessionId} because it's not connected`);
+    connectToWhatsApp(sessionId);
+  }
+
   res.json({
     sessionId,
     connected: session.connected || false,
-    qr: session.qr || null,
+    qr: session.qr ? true : false,
   });
 });
 
-// API: Get QR as PNG
-// Endpoint: صفحة HTML تعرض QR وتحدث تلقائياً
-app.get("/qr-page/:sessionId", async (req, res) => {
+// ✅ Get QR as PNG
+app.get("/get-qr/:sessionId", async (req, res) => {
   const { sessionId } = req.params;
   const session = sessions[sessionId];
 
-  if (!session) return res.status(404).send("Session not found");
+  if (!session) return res.status(404).json({ error: "Session not found" });
 
-  // صفحة HTML بسيطة
-  res.send(`
-    <!DOCTYPE html>
-    <html>
-      <head>
-        <title>WhatsApp QR</title>
-        <style>
-          body { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; font-family: sans-serif; }
-          img { margin-top: 20px; border: 2px solid #000; }
-        </style>
-      </head>
-      <body>
-        <h1>Scan this QR to connect WhatsApp</h1>
-        <img id="qr" src="/get-qr/${sessionId}" alt="WhatsApp QR" />
-        <script>
-          // تحديث الصورة كل 5 ثواني
-          setInterval(() => {
-            const img = document.getElementById('qr');
-            img.src = '/get-qr/${sessionId}?t=' + new Date().getTime();
-          }, 5000);
-        </script>
-      </body>
-    </html>
-  `);
+  if (!session.qr && session.connected) {
+    return res.json({ status: "success", message: "QR already scanned, session active" });
+  }
+
+  if (!session.qr) {
+    return res.status(404).json({ error: "No QR available yet" });
+  }
+
+  try {
+    const qrImage = await QRCode.toDataURL(session.qr);
+    const img = Buffer.from(qrImage.split(",")[1], "base64");
+
+    res.writeHead(200, {
+      "Content-Type": "image/png",
+      "Content-Length": img.length,
+    });
+    res.end(img);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 const PORT = process.env.PORT || 3000;
