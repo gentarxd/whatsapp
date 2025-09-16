@@ -191,18 +191,30 @@ setInterval(async () => {
       const jid = `${phone}@s.whatsapp.net`;
 
       if (imageUrl) {
-        try {
-          const response = await axios.get(imageUrl, { responseType: "arraybuffer", timeout: 15000 });
-          const buffer = Buffer.from(response.data, "binary");
-          await sock.sendMessage(jid, { image: buffer, caption: text || "" });
-        } catch (imgErr) {
-          console.error(`[queue] Error fetching/sending image to ${phone}:`, imgErr?.message || imgErr);
-          messageStatus[phone] = "error";
-          return;
-        }
-      } else {
-        await sock.sendMessage(jid, { text: text || "" });
-      }
+  try {
+    const response = await axios.get(imageUrl, { responseType: "arraybuffer", timeout: 30000 });
+    let buffer = Buffer.from(response.data, "binary");
+
+    // ✅ نحولها لـ jpeg مضمون عشان sharp ما يكسرش
+    const sharp = require("sharp");
+    buffer = await sharp(buffer).jpeg().toBuffer();
+
+    await sock.sendMessage(
+      jid,
+      { image: buffer, caption: text || "" },
+      { thumbnail: null } // 👈 كدة مش هيحاول sharp يولد thumbnail
+    );
+
+    messageStatus[phone] = "sent";
+  } catch (imgErr) {
+    console.error(`[queue] Error fetching/sending image to ${phone}:`, imgErr.message);
+    messageStatus[phone] = "error";
+    return;
+  }
+} else {
+  await sock.sendMessage(jid, { text });
+}
+
 
       console.log(`[queue] Sent to ${phone}`);
       messageStatus[phone] = "sent"; // ✅ سجلنا كـ sent
