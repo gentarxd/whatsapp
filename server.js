@@ -1,37 +1,20 @@
 import express from "express";
-import makeWASocket, { 
-  useMultiFileAuthState, 
-  fetchLatestBaileysVersion, 
-  DisconnectReason 
+import makeWASocket, {
+  useMultiFileAuthState,
+  fetchLatestBaileysVersion,
+  DisconnectReason,
 } from "@whiskeysockets/baileys";
 import QRCode from "qrcode";
 import fs from "fs";
-import path from "path";
 import axios from "axios";
 
-const sessions = {}; // 🟢 نخزن كل السيشنات هنا
-
-async function restoreSessions() {
-  const DISK_PATH = process.env.SESSION_PATH || "./sessions";
-  if (!fs.existsSync(DISK_PATH)) return;
-
-  const sessionDirs = fs.readdirSync(DISK_PATH);
-  for (const sessionId of sessionDirs) {
-    console.log("🔄 Restoring session:", sessionId);
-    await connectToWhatsApp(sessionId);
-  }
-}
-
-const app = express();
-app.use(express.json());
+const sessions = {}; // { sessionId: { sock, connected, qr } }
 
 async function connectToWhatsApp(sessionId) {
-  const DISK_PATH = process.env.SESSION_PATH || "./sessions"; 
+  const DISK_PATH = process.env.SESSION_PATH || "./sessions";
   const authFolder = `${DISK_PATH}/${sessionId}`;
 
-  if (!fs.existsSync(authFolder)) {
-    fs.mkdirSync(authFolder, { recursive: true });
-  }
+  if (!fs.existsSync(authFolder)) fs.mkdirSync(authFolder, { recursive: true });
 
   const { state, saveCreds } = await useMultiFileAuthState(authFolder);
   const { version } = await fetchLatestBaileysVersion();
@@ -42,11 +25,11 @@ async function connectToWhatsApp(sessionId) {
     printQRInTerminal: false,
   });
 
-  // 🟢 لو السيشن لسه متخزنش، نجهزه
+  // init session object once
   if (!sessions[sessionId]) {
     sessions[sessionId] = { sock: null, connected: false, qr: null };
   }
-  sessions[sessionId].sock = sock; // نخزن sock على طول
+  sessions[sessionId].sock = sock;
 
   sock.ev.on("creds.update", saveCreds);
 
@@ -54,17 +37,20 @@ async function connectToWhatsApp(sessionId) {
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
-      console.log(`🔑 QR generated for ${sessionId}`);
       sessions[sessionId].qr = qr;
+      sessions[sessionId].connected = false;
+      console.log(`🔑 QR generated for ${sessionId}`);
     }
 
     if (connection === "open") {
-      console.log(`✅ Session ${sessionId} connected`);
       sessions[sessionId].connected = true;
       sessions[sessionId].qr = null;
-    } else if (connection === "close") {
-      console.log(`❌ Session ${sessionId} closed`);
+      console.log(`✅ Session ${sessionId} connected`);
+    }
+
+    if (connection === "close") {
       sessions[sessionId].connected = false;
+      console.log(`❌ Session ${sessionId} closed`);
 
       const shouldReconnect =
         lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
@@ -74,119 +60,70 @@ async function connectToWhatsApp(sessionId) {
         connectToWhatsApp(sessionId);
       }
     }
-
-    console.log("📡 Current session object:", sessions[sessionId]);
   });
 
   return sock;
 }
 
-// ✅ Send message API
-app.post("/send-message", async (req, res) => {
-  const { sessionId, phone, text, imageUrl, caption } = req.body;
+const app = express();
+app.use(express.json());
 
-  if (!sessionId || !phone) {
-    return res.status(400).json({ error: "sessionId and phone are required" });
-  }
-
-  const session = sessions[sessionId];
-  if (!session || !session.sock || !session.connected) {
-    return res.status(400).json({ error: "Invalid sessionId or session not connected" });
-  }
-
-  try {
-    const jid = `${phone}@s.whatsapp.net`;
-
-    if (imageUrl) {
-      const response = await axios.get(imageUrl, { responseType: "arraybuffer" });
-      const buffer = Buffer.from(response.data, "binary");
-
-      await session.sock.sendMessage(jid, {
-        image: buffer,
-        caption: caption || text || "",
-      });
-    } else if (text) {
-      await session.sock.sendMessage(jid, { text });
-    } else {
-      return res.status(400).json({ error: "Either text or imageUrl is required" });
-    }
-
-    res.json({
-      status: "success",
-      message: "Message sent successfully",
-      to: phone,
-    });
-  } catch (err) {
-    console.error("❌ Send message error:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ✅ Create / reconnect session
+// create/connect session
 app.post("/connect", async (req, res) => {
   const { sessionId } = req.body;
-  if (!sessionId) return res.status(400).json({ error: "sessionId is required" });
+  if (!sessionId) return res.status(400).json({ error: "sessionId required" });
 
-  if (!sessions[sessionId]) {
-    sessions[sessionId] = { sock: null, connected: false, qr: null };
-  }
-
-  if (!sessions[sessionId].connected) {
+  if (!sessions[sessionId] || !sessions[sessionId].connected) {
     connectToWhatsApp(sessionId);
   }
 
-  res.json({ message: `Session ${sessionId} is being initialized/connected.` });
+  res.json({ message: `Session ${sessionId} initializing...` });
 });
 
-// ✅ Auto-connect if not connected when checking status
-app.get("/status/:sessionId", async (req, res) => {
+// check status
+app.get("/status/:sessionId", (req, res) => {
   const { sessionId } = req.params;
-  const session = sessions[sessionId];
-  if (!session) return res.status(404).json({ error: "Session not found" });
-
-  if (!session.connected) {
-    console.log(`⚡ Auto-reconnecting ${sessionId} because it's not connected`);
-    connectToWhatsApp(sessionId);
-  }
+  const s = sessions[sessionId];
+  if (!s) return res.status(404).json({ error: "Session not found" });
 
   res.json({
     sessionId,
-    connected: session.connected || false,
-    qr: session.qr ? true : false,
+    connected: s.connected,
+    qr: s.qr ? true : false,
   });
 });
 
-// ✅ Get QR as PNG
+// debug full session object
+app.get("/debug/:sessionId", (req, res) => {
+  const { sessionId } = req.params;
+  const s = sessions[sessionId];
+  if (!s) return res.status(404).json({ error: "Session not found" });
+
+  res.json(s);
+});
+
+// get QR png
 app.get("/get-qr/:sessionId", async (req, res) => {
   const { sessionId } = req.params;
-  const session = sessions[sessionId];
+  const s = sessions[sessionId];
+  if (!s) return res.status(404).json({ error: "Session not found" });
 
-  if (!session) return res.status(404).json({ error: "Session not found" });
-
-  if (!session.qr && session.connected) {
-    return res.json({ status: "success", message: "QR already scanned, session active" });
+  if (!s.qr && s.connected) {
+    return res.json({ status: "success", message: "Already connected" });
   }
 
-  if (!session.qr) {
+  if (!s.qr) {
     return res.status(404).json({ error: "No QR available yet" });
   }
 
-  try {
-    const qrImage = await QRCode.toDataURL(session.qr);
-    const img = Buffer.from(qrImage.split(",")[1], "base64");
-
-    res.writeHead(200, {
-      "Content-Type": "image/png",
-      "Content-Length": img.length,
-    });
-    res.end(img);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  const qrImage = await QRCode.toDataURL(s.qr);
+  const img = Buffer.from(qrImage.split(",")[1], "base64");
+  res.writeHead(200, {
+    "Content-Type": "image/png",
+    "Content-Length": img.length,
+  });
+  res.end(img);
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  restoreSessions(); // 🟢 رجّع كل السيشنات
-});
+app.listen(PORT, () => console.log(`🚀 Server on ${PORT}`));
