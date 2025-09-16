@@ -1,4 +1,4 @@
- import express from "express";
+import express from "express";
 import makeWASocket, { 
   useMultiFileAuthState, 
   fetchLatestBaileysVersion, 
@@ -9,7 +9,7 @@ import fs from "fs";
 import path from "path";
 import axios from "axios";
 
-const sessions = {}; // لازم فوق
+const sessions = {}; // 🟢 نخزن كل السيشنات هنا
 
 async function restoreSessions() {
   const DISK_PATH = process.env.SESSION_PATH || "./sessions";
@@ -42,6 +42,12 @@ async function connectToWhatsApp(sessionId) {
     printQRInTerminal: false,
   });
 
+  // 🟢 لو السيشن لسه متخزنش، نجهزه
+  if (!sessions[sessionId]) {
+    sessions[sessionId] = { sock: null, connected: false, qr: null };
+  }
+  sessions[sessionId].sock = sock; // نخزن sock على طول
+
   sock.ev.on("creds.update", saveCreds);
 
   sock.ev.on("connection.update", (update) => {
@@ -54,7 +60,6 @@ async function connectToWhatsApp(sessionId) {
 
     if (connection === "open") {
       console.log(`✅ Session ${sessionId} connected`);
-      sessions[sessionId].sock = sock;
       sessions[sessionId].connected = true;
       sessions[sessionId].qr = null;
     } else if (connection === "close") {
@@ -69,20 +74,11 @@ async function connectToWhatsApp(sessionId) {
         connectToWhatsApp(sessionId);
       }
     }
+
+    console.log("📡 Current session object:", sessions[sessionId]);
   });
 
- if (!sessions[sessionId]) {
-  sessions[sessionId] = {};
-}
-sessions[sessionId] = {
-  ...sessions[sessionId],
-  sock,
-  connected: sessions[sessionId].connected || false,
-  qr: sessions[sessionId].qr || null,
-};
-return sock;
-
-
+  return sock;
 }
 
 // ✅ Send message API
@@ -94,7 +90,7 @@ app.post("/send-message", async (req, res) => {
   }
 
   const session = sessions[sessionId];
-  if (!session || !session.sock) {
+  if (!session || !session.sock || !session.connected) {
     return res.status(400).json({ error: "Invalid sessionId or session not connected" });
   }
 
@@ -132,7 +128,7 @@ app.post("/connect", async (req, res) => {
   if (!sessionId) return res.status(400).json({ error: "sessionId is required" });
 
   if (!sessions[sessionId]) {
-    sessions[sessionId] = { connected: false, qr: null };
+    sessions[sessionId] = { sock: null, connected: false, qr: null };
   }
 
   if (!sessions[sessionId].connected) {
