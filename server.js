@@ -16,21 +16,6 @@ async function connectToWhatsApp(sessionId) {
     fs.mkdirSync(authFolder, { recursive: true });
   }
 
-  // هنا باقي إعدادات Baileys socket
-  const { state, saveCreds } = await useMultiFileAuthState(authFolder);
-  const sock = makeWASocket({
-    auth: state,
-    printQRInTerminal: false
-  });
-
-  // events + listeners ...
-
-  return sock; // ✅ جوا الفنكشن
-}
-
-// مفيش return sock; هنا برة
-
-
   const { state, saveCreds } = await useMultiFileAuthState(authFolder);
   const { version } = await fetchLatestBaileysVersion();
 
