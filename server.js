@@ -1,9 +1,5 @@
 import express from "express";
-import makeWASocket, {
-  useMultiFileAuthState,
-  DisconnectReason,
-} from "@whiskeysockets/baileys";
-import fs from "fs";
+import makeWASocket, { DisconnectReason, useMultiFileAuthState } from "@whiskeysockets/baileys";
 import path from "path";
 
 const app = express();
@@ -12,39 +8,40 @@ app.use(express.json());
 const sessions = {};
 const SESSION_PATH = process.env.SESSION_PATH || "./sessions";
 
-// 🔄 Connect or restore WhatsApp session
+// 📌 Connect to WhatsApp
 async function connectToWhatsApp(sessionId) {
-  const authFolder = path.join(SESSION_PATH, sessionId);
+  const sessionFolder = path.join(SESSION_PATH, sessionId);
+  const { state, saveCreds } = await useMultiFileAuthState(sessionFolder);
 
-  if (!fs.existsSync(authFolder)) {
-    fs.mkdirSync(authFolder, { recursive: true });
-  }
-
-  const { state, saveCreds } = await useMultiFileAuthState(authFolder);
-  const sock = makeWASocket({ auth: state });
-
-  sock.ev.on("creds.update", saveCreds);
+  const sock = makeWASocket({
+    auth: state,
+    printQRInTerminal: true,
+  });
 
   sock.ev.on("connection.update", (update) => {
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
       console.log(`🔑 QR generated for ${sessionId}`);
+      if (!sessions[sessionId]) sessions[sessionId] = {};
       sessions[sessionId].qr = qr;
+      sessions[sessionId].connected = false;
     }
 
     if (connection === "open") {
       console.log(`✅ Session ${sessionId} connected`);
-      sessions[sessionId].connected = true;
-      sessions[sessionId].qr = null;
-      sessions[sessionId].sock = sock;
+      sessions[sessionId] = {
+        ...sessions[sessionId],
+        sock,
+        connected: true,
+        qr: null,
+      };
     } else if (connection === "close") {
       console.log(`❌ Session ${sessionId} closed`);
       sessions[sessionId].connected = false;
 
       const shouldReconnect =
-        lastDisconnect?.error?.output?.statusCode !==
-        DisconnectReason.loggedOut;
+        lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
 
       if (shouldReconnect) {
         console.log(`🔄 Reconnecting ${sessionId}...`);
@@ -53,76 +50,56 @@ async function connectToWhatsApp(sessionId) {
     }
   });
 
-  // ✅ Ensure session object exists
+  sock.ev.on("creds.update", saveCreds);
+
   if (!sessions[sessionId]) {
     sessions[sessionId] = {};
   }
   sessions[sessionId] = {
     ...sessions[sessionId],
     sock,
-    connected: sessions[sessionId].connected || false,
-    qr: sessions[sessionId].qr || null,
+    connected: false,
+    qr: null,
   };
 
   return sock;
 }
 
-// 🔄 Restore sessions on server start
-async function restoreSessions() {
-  if (!fs.existsSync(SESSION_PATH)) return;
-
-  const sessionDirs = fs.readdirSync(SESSION_PATH);
-  for (const sessionId of sessionDirs) {
-    console.log("🔄 Restoring session:", sessionId);
-
-    if (!sessions[sessionId]) {
-      sessions[sessionId] = { connected: false, qr: null };
-    }
-
-    await connectToWhatsApp(sessionId);
-  }
-}
-
-// 📌 API Endpoints
+// 📌 Create Session
 app.post("/connect", async (req, res) => {
   const { sessionId } = req.body;
-  if (!sessionId) return res.status(400).json({ error: "sessionId required" });
+  if (!sessionId) return res.status(400).json({ error: "sessionId is required" });
 
   await connectToWhatsApp(sessionId);
-  res.json({ message: `Connecting ${sessionId}` });
+  res.json({ success: true, message: `Session ${sessionId} is connecting` });
 });
 
-app.get("/status/:sessionId", async (req, res) => {
+// 📌 Get Session Status
+app.get("/status/:sessionId", (req, res) => {
   const { sessionId } = req.params;
-  let session = sessions[sessionId];
-
-  if (!session) {
-    // 🟢 Try restoring from disk if missing in memory
-    const authFolder = path.join(SESSION_PATH, sessionId);
-    if (fs.existsSync(authFolder)) {
-      console.log(`♻️ Restoring ${sessionId} on-demand...`);
-      await connectToWhatsApp(sessionId);
-      session = sessions[sessionId];
-    }
-  }
-
+  const session = sessions[sessionId];
   if (!session) return res.status(404).json({ error: "Session not found" });
 
   res.json({
     sessionId,
     connected: session.connected || false,
-    qr: session.qr ? true : false,
+    qr: session.qr || false,
   });
 });
 
+// 📌 Send Message
 app.post("/send-message", async (req, res) => {
   const { sessionId, phone, text, imageUrl, caption } = req.body;
-  if (!sessionId || !phone)
+
+  if (!sessionId || !phone) {
     return res.status(400).json({ error: "sessionId and phone are required" });
+  }
 
   const session = sessions[sessionId];
-  if (!session || !session.connected)
+
+  if (!session || !session.sock) {
     return res.status(400).json({ error: "Session not connected" });
+  }
 
   try {
     if (imageUrl) {
@@ -135,12 +112,11 @@ app.post("/send-message", async (req, res) => {
     }
     res.json({ success: true });
   } catch (err) {
+    console.error("❌ Send message error:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// 🚀 Start server
-app.listen(3000, async () => {
-  console.log("Server running on port 3000");
-  await restoreSessions();
+app.listen(3000, () => {
+  console.log("🚀 Server running on port 3000");
 });
