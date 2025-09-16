@@ -151,6 +151,23 @@ app.get("/status/:sessionId", requireApiKey, (req, res) => {
 app.get("/", (req, res) => {
   res.send("Server is running!");
 });
+// ✅ دالة لإعادة توصيل الجلسات عند بدء التشغيل
+const reconnectSessions = () => {
+  const authDir = './auth_info';
+  if (fs.existsSync(authDir)) {
+    // تأكد من أن مسار القرص الدائم صحيح إذا قمت بتغييره في إعدادات Render
+    const sessionFolders = fs.readdirSync(authDir); 
+    console.log(`Found ${sessionFolders.length} session(s) to reconnect.`);
+    sessionFolders.forEach(sessionId => {
+      console.log(`🚀 Reconnecting session: ${sessionId}`);
+      startSock(sessionId);
+    });
+  }
+};
+
+// قم باستدعاء الدالة عند بدء تشغيل الخادم
+reconnectSessions();
 
 // Start server
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+
