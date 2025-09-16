@@ -107,29 +107,34 @@ app.get("/get-qr/:sessionId", requireApiKey, async (req, res) => {
 app.post("/send-message", requireApiKey, async (req, res) => {
   const { sessionId, phone, text, imageUrl } = req.body;
 
-  if (!sessionId || !phone)
+  if (!sessionId || !phone) 
     return res.status(400).json({ error: "sessionId and phone required" });
 
   const sock = sessions[sessionId];
   if (!sock) 
     return res.status(400).json({ error: "Invalid session ID" });
 
-  // 📌 مفيش داعي أشيّك على sessionStatus هنا عشان كان بيعمل false error
+  // ✅ اتأكد إن السيشن متوصل
+  if (sessionStatus[sessionId] !== "open") {
+    return res.status(400).json({ error: "Session is not connected. Please scan QR again." });
+  }
+
   try {
     const jid = `${phone}@s.whatsapp.net`;
 
     if (imageUrl) {
       const response = await axios.get(imageUrl, { responseType: "arraybuffer" });
       const buffer = Buffer.from(response.data, "binary");
+
       await sock.sendMessage(jid, { image: buffer, caption: text || "" });
     } else {
       await sock.sendMessage(jid, { text });
     }
 
-    res.json({
-      status: "success",
-      message: "Message sent successfully ✅",
-      phone,
+    res.json({ 
+      status: "success", 
+      message: "Message sent successfully", 
+      phone 
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
