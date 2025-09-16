@@ -18,12 +18,11 @@ const API_KEY = process.env.API_KEY || null;
 // ✅ =======================================================
 const AUTH_DIR = '/data/auth_info';
 
+// Queue للرسائل
+const messageQueue = [];
 
 // إنشاء الـ WhatsApp socket
 async function startSock(sessionId) {
-  // ✅ =======================================================
-  // ✅ تم استخدام المسار الدائم هنا لحفظ الجلسات
-  // ✅ =======================================================
   const authFolder = `${AUTH_DIR}/${sessionId}`;
   if (!fs.existsSync(AUTH_DIR)) {
     fs.mkdirSync(AUTH_DIR, { recursive: true });
@@ -112,76 +111,44 @@ app.get("/get-qr/:sessionId", requireApiKey, async (req, res) => {
   }
 });
 
-// ✅ Send message
-// ✅ Send message (النسخة الجديدة الذكية)
+// ✅ Send message (إضافة للـ Queue بدل الإرسال المباشر)
 app.post("/send-message", requireApiKey, async (req, res) => {
   const { sessionId, phone, text, imageUrl } = req.body;
 
   if (!sessionId || !phone)
     return res.status(400).json({ error: "sessionId and phone required" });
-  
-  console.log(`[send-message] Request for session: ${sessionId}. Current status: ${sessionStatus[sessionId]}`);
 
-  // --- بداية الكود الذكي ---
-  // إذا كانت الجلسة غير متصلة، حاول إعادة توصيلها
-  if (sessionStatus[sessionId] !== "open" || !sessions[sessionId]) {
-    console.log(`[send-message] Session "${sessionId}" not ready. Attempting to reconnect...`);
-    const authFolder = `${AUTH_DIR}/${sessionId}`;
-    
-    // تحقق أولاً من وجود ملفات الجلسة
-    if (fs.existsSync(authFolder)) {
-      try {
-        await startSock(sessionId);
-        // امنحها 5 ثوانٍ للاتصال
-        await new Promise(resolve => setTimeout(resolve, 5000)); 
-        
-        console.log(`[send-message] Re-checked status: ${sessionStatus[sessionId]}`);
-        
-        // إذا فشل الاتصال مرة أخرى، قم بإرجاع خطأ
-        if (sessionStatus[sessionId] !== "open") {
-          return res.status(400).json({ error: "Session failed to connect after auto-reconnect attempt." });
-        }
-      } catch (e) {
-        console.error(`[send-message] Error during reconnect attempt:`, e);
-        return res.status(500).json({ error: "Failed to start session during send." });
-      }
-    } else {
-      // إذا لم تكن هناك ملفات، فلا يمكن فعل شيء
-      return res.status(400).json({ error: "Session files not found. Please create session and scan QR again." });
-    }
-  }
-  // --- نهاية الكود الذكي ---
+  messageQueue.push({ sessionId, phone, text, imageUrl });
+  console.log(`[queue] Added message for ${phone}. Queue length: ${messageQueue.length}`);
 
+  res.json({ status: "queued", phone });
+});
 
-  const sock = sessions[sessionId];
-  if (!sock) {
-    return res.status(400).json({ error: "Fatal: Sock object not found even after check." });
-  }
+// ✅ Worker يبعث رسالة كل ثانيتين
+setInterval(async () => {
+  if (messageQueue.length === 0) return;
 
+  const { sessionId, phone, text, imageUrl } = messageQueue.shift();
   try {
+    const sock = sessions[sessionId];
+    if (!sock) return console.error(`[queue] No session found: ${sessionId}`);
+
     const jid = `${phone}@s.whatsapp.net`;
-    console.log(`[send-message] Sending message to ${jid}`);
 
     if (imageUrl) {
       const response = await axios.get(imageUrl, { responseType: "arraybuffer" });
       const buffer = Buffer.from(response.data, "binary");
-
       await sock.sendMessage(jid, { image: buffer, caption: text || "" });
     } else {
       await sock.sendMessage(jid, { text });
     }
 
-    res.json({
-      status: "success",
-      message: "Message sent successfully",
-      phone
-    });
-    console.log(`[send-message] Message sent successfully to ${jid}`);
-  } catch (e) {
-    console.error(`[send-message] Error sending message:`, e);
-    res.status(500).json({ error: e.message });
+    console.log(`[queue] Sent to ${phone}`);
+  } catch (err) {
+    console.error(`[queue] Error sending to ${phone}:`, err);
   }
-});
+}, 2000); // رسالة كل ثانيتين
+
 // ✅ Session status check
 app.get("/status/:sessionId", requireApiKey, (req, res) => {
   const { sessionId } = req.params;
@@ -195,9 +162,6 @@ app.get("/", (req, res) => {
 
 // ✅ دالة لإعادة توصيل الجلسات عند بدء التشغيل
 const reconnectSessions = () => {
-  // ✅ =======================================================
-  // ✅ تم استخدام المسار الدائم هنا لقراءة الجلسات
-  // ✅ =======================================================
   if (fs.existsSync(AUTH_DIR)) {
     const sessionFolders = fs.readdirSync(AUTH_DIR);
     console.log(`Found ${sessionFolders.length} session(s) to reconnect.`);
