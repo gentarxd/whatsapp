@@ -71,7 +71,6 @@ async function startSock(sessionId) {
           const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
           if (shouldReconnect) {
             console.log(`Reconnecting ${sessionId}...`);
-            // نغلق الحالية إن لزم ونحاول إعادة تشغيل جديدة
             try {
               if (sessions[sessionId]) {
                 try { sessions[sessionId].logout && sessions[sessionId].logout(); } catch(e){/* ignore */ }
@@ -79,7 +78,6 @@ async function startSock(sessionId) {
             } catch(e){ /* ignore */ }
             startSock(sessionId).catch(e => console.error(`Reconnection error for ${sessionId}:`, e?.message || e));
           } else {
-            // logged out — حذف ملفات الجلسة قد يكون مرغوباً لكن سنكتفي بتغيير الحالة
             sessionStatus[sessionId] = "logged_out";
             console.log(`Session ${sessionId} logged out.`);
           }
@@ -93,7 +91,7 @@ async function startSock(sessionId) {
     return sock;
   } catch (err) {
     console.error(`startSock(${sessionId}) error:`, err?.message || err);
-    throw err; // caller يمكنه التعامل مع الخطأ
+    throw err;
   }
 }
 
@@ -164,7 +162,7 @@ app.post("/send-message", requireApiKey, async (req, res) => {
       return res.status(400).json({ error: "sessionId and phone required" });
 
     messageQueue.push({ sessionId, phone, text, imageUrl });
-    messageStatus[phone] = "queued"; // ✅ سجلنا كـ queued
+    messageStatus[phone] = "queued";
     console.log(`[queue] Added message for ${phone}. Queue length: ${messageQueue.length}`);
 
     res.json({ status: "queued", phone });
@@ -191,47 +189,41 @@ setInterval(async () => {
       const jid = `${phone}@s.whatsapp.net`;
 
       if (imageUrl) {
-  try {
-    const response = await axios.get(imageUrl, { responseType: "arraybuffer", timeout: 30000 });
-    let buffer = Buffer.from(response.data, "binary");
+        try {
+          const response = await axios.get(imageUrl, { responseType: "arraybuffer", timeout: 30000 });
+          const buffer = Buffer.from(response.data, "binary");
 
-    // ✅ نحولها لـ jpeg مضمون عشان sharp ما يكسرش
-    const sharp = require("sharp");
-    buffer = await sharp(buffer).jpeg().toBuffer();
+          await sock.sendMessage(
+            jid,
+            { image: buffer, caption: text || "" },
+            { thumbnail: null } // 👈 يمنع مشاكل sharp
+          );
 
-    await sock.sendMessage(
-      jid,
-      { image: buffer, caption: text || "" },
-      { thumbnail: null } // 👈 كدة مش هيحاول sharp يولد thumbnail
-    );
-
-    messageStatus[phone] = "sent";
-  } catch (imgErr) {
-    console.error(`[queue] Error fetching/sending image to ${phone}:`, imgErr.message);
-    messageStatus[phone] = "error";
-    return;
-  }
-} else {
-  await sock.sendMessage(jid, { text });
-}
-
+          messageStatus[phone] = "sent";
+        } catch (imgErr) {
+          console.error(`[queue] Error fetching/sending image to ${phone}:`, imgErr.message);
+          messageStatus[phone] = "error";
+          return;
+        }
+      } else {
+        await sock.sendMessage(jid, { text });
+        messageStatus[phone] = "sent";
+      }
 
       console.log(`[queue] Sent to ${phone}`);
-      messageStatus[phone] = "sent"; // ✅ سجلنا كـ sent
     } catch (err) {
       console.error(`[queue] Error sending to ${phone}:`, err?.message || err);
-      messageStatus[phone] = "error"; // ✅ سجلنا كـ error
+      messageStatus[phone] = "error";
     }
   } catch (outerErr) {
-    // منع أي خطأ من كسر الـ interval
     console.error("Worker interval unexpected error:", outerErr?.message || outerErr);
   }
-}, 2000); // رسالة كل ثانيتين
+}, 2000);
 
-// ✅ Endpoint جديد لتتبع حالة كل الرسائل
+// ✅ Endpoint لتتبع حالة كل الرسائل
 app.get("/message-status", requireApiKey, (req, res) => {
   try {
-    res.json(messageStatus); // يرجع كل الأرقام وحالتها: queued | sent | error | no_session
+    res.json(messageStatus);
   } catch (err) {
     console.error("/message-status error:", err?.message || err);
     res.status(500).json({ error: "failed to get message status" });
@@ -273,21 +265,17 @@ const reconnectSessions = () => {
   }
 };
 
-// قم باستدعاء الدالة عند بدء تشغيل الخادم
 reconnectSessions();
 
 // Global handlers لمنع السيرفر من السقوط
 process.on('uncaughtException', (err) => {
   console.error('uncaughtException:', err?.message || err);
-  // لا نغلق السيرفر هنا — نستمر لتفادي توقف الخدمة المفاجئ
 });
 
 process.on('unhandledRejection', (reason, p) => {
   console.error('unhandledRejection at:', p, 'reason:', reason);
-  // نستمر في التشغيل (يمكنك إضافة logging خارجي هنا)
 });
 
-// Error handling middleware (Express) — catch لأي خطأ في المسارات
 app.use((err, req, res, next) => {
   console.error('Express error middleware:', err?.message || err);
   res.status(500).json({ error: 'internal_server_error' });
