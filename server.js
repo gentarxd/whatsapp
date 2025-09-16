@@ -174,51 +174,73 @@ app.post("/send-message", requireApiKey, async (req, res) => {
 
 // Worker يبعث رسالة كل ثانيتين
 setInterval(async () => {
+  if (messageQueue.length === 0) return;
+
+  const { sessionId, phone, text, imageUrl } = messageQueue.shift();
+  const sock = sessions[sessionId];
+
+  if (!sock) {
+    console.error(`[queue] No session found: ${sessionId}`);
+    messageStatus[phone] = "no_session";
+    return;
+  }
+
+  const jid = `${phone}@s.whatsapp.net`;
+
   try {
-    if (messageQueue.length === 0) return;
+    if (imageUrl) {
+      let sent = false;
 
-    const { sessionId, phone, text, imageUrl } = messageQueue.shift();
-    try {
-      const sock = sessions[sessionId];
-      if (!sock) {
-        console.error(`[queue] No session found: ${sessionId}`);
-        messageStatus[phone] = "no_session";
-        return;
-      }
-
-      const jid = `${phone}@s.whatsapp.net`;
-
-      if (imageUrl) {
+      for (let attempt = 1; attempt <= 3; attempt++) {
         try {
-          const response = await axios.get(imageUrl, { responseType: "arraybuffer", timeout: 30000 });
-          const buffer = Buffer.from(response.data, "binary");
+          if (attempt < 3) {
+            // أول محاولتين بالـ image
+            const response = await axios.get(imageUrl, {
+              responseType: "arraybuffer",
+              timeout: 60000 // دقيقة
+            });
 
-          await sock.sendMessage(
-            jid,
-            { image: buffer, caption: text || "" },
-            { thumbnail: null } // 👈 يمنع مشاكل sharp
-          );
+            let buffer = Buffer.from(response.data, "binary");
+            const sharp = (await import("sharp")).default;
+            buffer = await sharp(buffer).jpeg().toBuffer();
+
+            await sock.sendMessage(jid, {
+              image: buffer,
+              caption: text || ""
+            }, { thumbnail: null });
+
+            console.log(`[queue] Sent image (attempt ${attempt}) to ${phone}`);
+          } else {
+            // المحاولة الثالثة: text فقط
+            await sock.sendMessage(jid, { text: text || " " });
+            console.log(`[queue] Sent text fallback to ${phone}`);
+          }
 
           messageStatus[phone] = "sent";
-        } catch (imgErr) {
-          console.error(`[queue] Error fetching/sending image to ${phone}:`, imgErr.message);
-          messageStatus[phone] = "error";
-          return;
+          sent = true;
+          break;
+        } catch (err) {
+          console.error(`[queue] Error attempt ${attempt} for ${phone}:`, err.message);
         }
-      } else {
-        await sock.sendMessage(jid, { text });
-        messageStatus[phone] = "sent";
       }
 
-      console.log(`[queue] Sent to ${phone}`);
-    } catch (err) {
-      console.error(`[queue] Error sending to ${phone}:`, err?.message || err);
-      messageStatus[phone] = "error";
+      if (!sent) {
+        messageStatus[phone] = "error";
+        console.error(`[queue] All attempts failed for ${phone}`);
+      }
+
+    } else {
+      // لو مفيش صورة أصلا يبعت text عادي
+      await sock.sendMessage(jid, { text });
+      console.log(`[queue] Sent text to ${phone}`);
+      messageStatus[phone] = "sent";
     }
-  } catch (outerErr) {
-    console.error("Worker interval unexpected error:", outerErr?.message || outerErr);
+  } catch (err) {
+    console.error(`[queue] Fatal error sending to ${phone}:`, err.message);
+    messageStatus[phone] = "error";
   }
 }, 2000);
+
 
 // ✅ Endpoint لتتبع حالة كل الرسائل
 app.get("/message-status", requireApiKey, (req, res) => {
