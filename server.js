@@ -6,12 +6,24 @@ import makeWASocket, {
 } from "@whiskeysockets/baileys";
 import QRCode from "qrcode";
 import fs from "fs";
+import path from "path";
 import axios from "axios";
+
+const sessions = {}; // لازم فوق
+
+async function restoreSessions() {
+  const DISK_PATH = process.env.SESSION_PATH || "./sessions";
+  if (!fs.existsSync(DISK_PATH)) return;
+
+  const sessionDirs = fs.readdirSync(DISK_PATH);
+  for (const sessionId of sessionDirs) {
+    console.log("🔄 Restoring session:", sessionId);
+    await connectToWhatsApp(sessionId);
+  }
+}
 
 const app = express();
 app.use(express.json());
-
-const sessions = {};
 
 async function connectToWhatsApp(sessionId) {
   const DISK_PATH = process.env.SESSION_PATH || "./sessions"; 
@@ -44,7 +56,7 @@ async function connectToWhatsApp(sessionId) {
       console.log(`✅ Session ${sessionId} connected`);
       sessions[sessionId].sock = sock;
       sessions[sessionId].connected = true;
-      sessions[sessionId].qr = null; // 🟢 امسح QR بعد الاتصال
+      sessions[sessionId].qr = null;
     } else if (connection === "close") {
       console.log(`❌ Session ${sessionId} closed`);
       sessions[sessionId].connected = false;
@@ -59,7 +71,7 @@ async function connectToWhatsApp(sessionId) {
     }
   });
 
-  sessions[sessionId].sock = sock;
+  sessions[sessionId] = { sock, connected: false, qr: null };
   return sock;
 }
 
@@ -80,7 +92,6 @@ app.post("/send-message", async (req, res) => {
     const jid = `${phone}@s.whatsapp.net`;
 
     if (imageUrl) {
-      // نزّل الصورة
       const response = await axios.get(imageUrl, { responseType: "arraybuffer" });
       const buffer = Buffer.from(response.data, "binary");
 
@@ -169,4 +180,7 @@ app.get("/get-qr/:sessionId", async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+  restoreSessions(); // 🟢 رجّع كل السيشنات
+});
