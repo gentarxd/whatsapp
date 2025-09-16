@@ -113,22 +113,54 @@ app.get("/get-qr/:sessionId", requireApiKey, async (req, res) => {
 });
 
 // ✅ Send message
+// ✅ Send message (النسخة الجديدة الذكية)
 app.post("/send-message", requireApiKey, async (req, res) => {
   const { sessionId, phone, text, imageUrl } = req.body;
 
   if (!sessionId || !phone)
     return res.status(400).json({ error: "sessionId and phone required" });
+  
+  console.log(`[send-message] Request for session: ${sessionId}. Current status: ${sessionStatus[sessionId]}`);
+
+  // --- بداية الكود الذكي ---
+  // إذا كانت الجلسة غير متصلة، حاول إعادة توصيلها
+  if (sessionStatus[sessionId] !== "open" || !sessions[sessionId]) {
+    console.log(`[send-message] Session "${sessionId}" not ready. Attempting to reconnect...`);
+    const authFolder = `${AUTH_DIR}/${sessionId}`;
+    
+    // تحقق أولاً من وجود ملفات الجلسة
+    if (fs.existsSync(authFolder)) {
+      try {
+        await startSock(sessionId);
+        // امنحها 5 ثوانٍ للاتصال
+        await new Promise(resolve => setTimeout(resolve, 5000)); 
+        
+        console.log(`[send-message] Re-checked status: ${sessionStatus[sessionId]}`);
+        
+        // إذا فشل الاتصال مرة أخرى، قم بإرجاع خطأ
+        if (sessionStatus[sessionId] !== "open") {
+          return res.status(400).json({ error: "Session failed to connect after auto-reconnect attempt." });
+        }
+      } catch (e) {
+        console.error(`[send-message] Error during reconnect attempt:`, e);
+        return res.status(500).json({ error: "Failed to start session during send." });
+      }
+    } else {
+      // إذا لم تكن هناك ملفات، فلا يمكن فعل شيء
+      return res.status(400).json({ error: "Session files not found. Please create session and scan QR again." });
+    }
+  }
+  // --- نهاية الكود الذكي ---
+
 
   const sock = sessions[sessionId];
-  if (!sock)
-    return res.status(400).json({ error: "Invalid session ID" });
-
-  if (sessionStatus[sessionId] !== "open") {
-    return res.status(400).json({ error: "Session is not connected. Please scan QR again." });
+  if (!sock) {
+    return res.status(400).json({ error: "Fatal: Sock object not found even after check." });
   }
 
   try {
     const jid = `${phone}@s.whatsapp.net`;
+    console.log(`[send-message] Sending message to ${jid}`);
 
     if (imageUrl) {
       const response = await axios.get(imageUrl, { responseType: "arraybuffer" });
@@ -144,11 +176,12 @@ app.post("/send-message", requireApiKey, async (req, res) => {
       message: "Message sent successfully",
       phone
     });
+    console.log(`[send-message] Message sent successfully to ${jid}`);
   } catch (e) {
+    console.error(`[send-message] Error sending message:`, e);
     res.status(500).json({ error: e.message });
   }
 });
-
 // ✅ Session status check
 app.get("/status/:sessionId", requireApiKey, (req, res) => {
   const { sessionId } = req.params;
