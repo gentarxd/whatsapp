@@ -13,11 +13,20 @@ const sessionStatus = {};
 const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.API_KEY || null;
 
+// ✅ =======================================================
+// ✅ تم تعريف المسار الدائم هنا
+// ✅ =======================================================
+const AUTH_DIR = '/data/auth_info';
+
+
 // إنشاء الـ WhatsApp socket
 async function startSock(sessionId) {
-  const authFolder = `./auth_info/${sessionId}`;
-  if (!fs.existsSync(authFolder)) {
-    fs.mkdirSync(authFolder, { recursive: true });
+  // ✅ =======================================================
+  // ✅ تم استخدام المسار الدائم هنا لحفظ الجلسات
+  // ✅ =======================================================
+  const authFolder = `${AUTH_DIR}/${sessionId}`;
+  if (!fs.existsSync(AUTH_DIR)) {
+    fs.mkdirSync(AUTH_DIR, { recursive: true });
   }
 
   const { state, saveCreds } = await useMultiFileAuthState(authFolder);
@@ -107,14 +116,13 @@ app.get("/get-qr/:sessionId", requireApiKey, async (req, res) => {
 app.post("/send-message", requireApiKey, async (req, res) => {
   const { sessionId, phone, text, imageUrl } = req.body;
 
-  if (!sessionId || !phone) 
+  if (!sessionId || !phone)
     return res.status(400).json({ error: "sessionId and phone required" });
 
   const sock = sessions[sessionId];
-  if (!sock) 
+  if (!sock)
     return res.status(400).json({ error: "Invalid session ID" });
 
-  // ✅ اتأكد إن السيشن متوصل
   if (sessionStatus[sessionId] !== "open") {
     return res.status(400).json({ error: "Session is not connected. Please scan QR again." });
   }
@@ -131,10 +139,10 @@ app.post("/send-message", requireApiKey, async (req, res) => {
       await sock.sendMessage(jid, { text });
     }
 
-    res.json({ 
-      status: "success", 
-      message: "Message sent successfully", 
-      phone 
+    res.json({
+      status: "success",
+      message: "Message sent successfully",
+      phone
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -151,17 +159,22 @@ app.get("/status/:sessionId", requireApiKey, (req, res) => {
 app.get("/", (req, res) => {
   res.send("Server is running!");
 });
+
 // ✅ دالة لإعادة توصيل الجلسات عند بدء التشغيل
 const reconnectSessions = () => {
-  const authDir = './auth_info';
-  if (fs.existsSync(authDir)) {
-    // تأكد من أن مسار القرص الدائم صحيح إذا قمت بتغييره في إعدادات Render
-    const sessionFolders = fs.readdirSync(authDir); 
+  // ✅ =======================================================
+  // ✅ تم استخدام المسار الدائم هنا لقراءة الجلسات
+  // ✅ =======================================================
+  if (fs.existsSync(AUTH_DIR)) {
+    const sessionFolders = fs.readdirSync(AUTH_DIR);
     console.log(`Found ${sessionFolders.length} session(s) to reconnect.`);
     sessionFolders.forEach(sessionId => {
       console.log(`🚀 Reconnecting session: ${sessionId}`);
       startSock(sessionId);
     });
+  } else {
+    console.log(`Auth directory not found, creating one at: ${AUTH_DIR}`);
+    fs.mkdirSync(AUTH_DIR, { recursive: true });
   }
 };
 
@@ -170,4 +183,3 @@ reconnectSessions();
 
 // Start server
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
-
