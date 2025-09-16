@@ -1,4 +1,4 @@
-import express from "express";
+ import express from "express";
 import makeWASocket, { 
   useMultiFileAuthState, 
   fetchLatestBaileysVersion, 
@@ -71,8 +71,18 @@ async function connectToWhatsApp(sessionId) {
     }
   });
 
-  sessions[sessionId] = { sock, connected: false, qr: null };
-  return sock;
+ if (!sessions[sessionId]) {
+  sessions[sessionId] = {};
+}
+sessions[sessionId] = {
+  ...sessions[sessionId],
+  sock,
+  connected: sessions[sessionId].connected || false,
+  qr: sessions[sessionId].qr || null,
+};
+return sock;
+
+
 }
 
 // ✅ Send message API
