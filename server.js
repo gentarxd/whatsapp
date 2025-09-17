@@ -48,44 +48,48 @@ async function startSock(sessionId) {
     // حفظ الكريدينشالز
     sock.ev.on("creds.update", saveCreds);
 
-    sock.ev.on("connection.update", (update) => {
-      try {
-        const { connection, lastDisconnect, qr } = update;
+   sock.ev.on("connection.update", (update) => {
+  try {
+    const { connection, lastDisconnect, qr } = update;
 
-        if (qr) {
-          qrCodes[sessionId] = qr;
-          sessionStatus[sessionId] = "qr";
-          console.log(`QR generated for ${sessionId}`);
-        }
+    if (qr) {
+      qrCodes[sessionId] = qr;
+      sessionStatus[sessionId] = "qr";
+      console.log(`QR generated for ${sessionId}`);
+    }
 
-        if (connection === "open") {
-          sessionStatus[sessionId] = "open";
-          console.log(`Session ${sessionId} connected ✅`);
-          delete qrCodes[sessionId];
-        }
+    if (connection === "open") {
+      sessionStatus[sessionId] = "open";
+      console.log(`Session ${sessionId} connected ✅`);
+      delete qrCodes[sessionId];
+    }
 
-        if (connection === "close") {
-          sessionStatus[sessionId] = "close";
-          console.log(`Session ${sessionId} closed ❌`);
+    if (connection === "close") {
+      sessionStatus[sessionId] = "close";
+      console.log(`Session ${sessionId} closed ❌`);
 
-          const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
-          if (shouldReconnect) {
-            console.log(`Reconnecting ${sessionId}...`);
-            try {
-              if (sessions[sessionId]) {
-                try { sessions[sessionId].logout && sessions[sessionId].logout(); } catch(e){/* ignore */ }
-              }
-            } catch(e){ /* ignore */ }
-            startSock(sessionId).catch(e => console.error(`Reconnection error for ${sessionId}:`, e?.message || e));
-          } else {
-            sessionStatus[sessionId] = "logged_out";
-            console.log(`Session ${sessionId} logged out.`);
-          }
-        }
-      } catch (e) {
-        console.error(`Error in connection.update handler for ${sessionId}:`, e?.message || e);
+      const shouldReconnect =
+        (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
+
+      if (shouldReconnect) {
+        console.log(`🔄 Reconnecting ${sessionId} in 5s...`);
+        // امسح السيشن القديم
+        delete sessions[sessionId];
+        setTimeout(() => {
+          startSock(sessionId).catch(e =>
+            console.error(`Reconnection error for ${sessionId}:`, e?.message || e)
+          );
+        }, 5000);
+      } else {
+        sessionStatus[sessionId] = "logged_out";
+        console.log(`Session ${sessionId} logged out. تحتاج QR جديد`);
       }
-    });
+    }
+  } catch (e) {
+    console.error(`Error in connection.update handler for ${sessionId}:`, e?.message || e);
+  }
+});
+
 
     sessions[sessionId] = sock;
     return sock;
