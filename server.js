@@ -13,6 +13,9 @@ const sessionStatus = {};
 const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.API_KEY || null;
 
+// ---- هنا تقدر تحدد الجلسة المفضلة عبر env أو endpoint لاحقاً
+let preferredSessionId = process.env.PREFERRED_SESSION || null; // ex: "P1WM"
+
 // ✅ =======================================================
 // ✅ تم تعريف المسار الدائم هنا
 // ✅ =======================================================
@@ -27,6 +30,8 @@ const messageStatus = {}; // { phone: "queued" | "sent" | "error" | "no_session"
 // إنشاء الـ WhatsApp socket
 async function startSock(sessionId) {
   try {
+    if (!sessionId) throw new Error("sessionId required for startSock");
+
     // لو الجلسة موجودة مسبقًا نرجعها بدل ما نعمل واحدة جديدة
     if (sessions[sessionId]) {
       console.log(`Session ${sessionId} already exists, returning existing socket.`);
@@ -37,6 +42,8 @@ async function startSock(sessionId) {
     if (!fs.existsSync(AUTH_DIR)) {
       fs.mkdirSync(AUTH_DIR, { recursive: true });
     }
+    // ensure authFolder exists so useMultiFileAuthState works smoothly
+    if (!fs.existsSync(authFolder)) fs.mkdirSync(authFolder, { recursive: true });
 
     const { state, saveCreds } = await useMultiFileAuthState(authFolder);
 
@@ -48,48 +55,55 @@ async function startSock(sessionId) {
     // حفظ الكريدينشالز
     sock.ev.on("creds.update", saveCreds);
 
-   sock.ev.on("connection.update", (update) => {
-  try {
-    const { connection, lastDisconnect, qr } = update;
+    sock.ev.on("connection.update", (update) => {
+      try {
+        const { connection, lastDisconnect, qr } = update;
 
-    if (qr) {
-      qrCodes[sessionId] = qr;
-      sessionStatus[sessionId] = "qr";
-      console.log(`QR generated for ${sessionId}`);
-    }
+        if (qr) {
+          qrCodes[sessionId] = qr;
+          sessionStatus[sessionId] = "qr";
+          console.log(`QR generated for ${sessionId}`);
+        }
 
-    if (connection === "open") {
-      sessionStatus[sessionId] = "open";
-      console.log(`Session ${sessionId} connected ✅`);
-      delete qrCodes[sessionId];
-    }
+        if (connection === "open") {
+          sessionStatus[sessionId] = "open";
+          console.log(`Session ${sessionId} connected ✅`);
+          delete qrCodes[sessionId];
+        }
 
-    if (connection === "close") {
-      sessionStatus[sessionId] = "close";
-      console.log(`Session ${sessionId} closed ❌`);
+        if (connection === "close") {
+          sessionStatus[sessionId] = "close";
+          console.log(`Session ${sessionId} closed ❌`);
 
-      const shouldReconnect =
-        (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
+          const shouldReconnect =
+            (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
 
-      if (shouldReconnect) {
-        console.log(`🔄 Reconnecting ${sessionId} in 5s...`);
-        // امسح السيشن القديم
-        delete sessions[sessionId];
-        setTimeout(() => {
-          startSock(sessionId).catch(e =>
-            console.error(`Reconnection error for ${sessionId}:`, e?.message || e)
-          );
-        }, 5000);
-      } else {
-        sessionStatus[sessionId] = "logged_out";
-        console.log(`Session ${sessionId} logged out. تحتاج QR جديد`);
+          if (shouldReconnect) {
+            // هنا نقرر أي session نحاول نعمله reconnect:
+            // 1) لو فيه preferredSessionId محدد -> نحاول نجيبه
+            // 2) لو مافيش -> نعيد تشغيل نفس sessionId
+            const target = preferredSessionId || sessionId;
+
+            console.log(`🔄 Will attempt reconnect to "${target}" in 5s (preferred: ${preferredSessionId ? 'yes' : 'no'})...`);
+
+            // حذف الجلسة القديمة من الذاكرة عشان ميتعارضش
+            try { delete sessions[sessionId]; } catch (e) { /* ignore */ }
+
+            setTimeout(() => {
+              // لو target نفس sessionId — startSock سيعيد فتحها
+              startSock(target).catch(e => {
+                console.error(`Reconnection error for ${target}:`, e?.message || e);
+              });
+            }, 5000);
+          } else {
+            sessionStatus[sessionId] = "logged_out";
+            console.log(`Session ${sessionId} logged out. تحتاج QR جديد`);
+          }
+        }
+      } catch (e) {
+        console.error(`Error in connection.update handler for ${sessionId}:`, e?.message || e);
       }
-    }
-  } catch (e) {
-    console.error(`Error in connection.update handler for ${sessionId}:`, e?.message || e);
-  }
-});
-
+    });
 
     sessions[sessionId] = sock;
     return sock;
@@ -111,6 +125,20 @@ function requireApiKey(req, res, next) {
 // =======================
 // Routes
 // =======================
+
+// Endpoint لتعيين الجلسة المفضلة ديناميكياً (مثلاً: P1WM)
+app.post("/set-preferred-session", requireApiKey, (req, res) => {
+  try {
+    const { sessionId } = req.body;
+    if (!sessionId) return res.status(400).json({ error: "sessionId required" });
+    preferredSessionId = sessionId;
+    console.log(`Preferred session set to: ${preferredSessionId}`);
+    res.json({ message: "preferred session set", preferredSessionId });
+  } catch (err) {
+    console.error("/set-preferred-session error:", err?.message || err);
+    res.status(500).json({ error: "failed to set preferred session" });
+  }
+});
 
 // ✅ Create session
 app.post("/create-session", requireApiKey, async (req, res) => {
@@ -205,13 +233,16 @@ setInterval(async () => {
             });
 
             let buffer = Buffer.from(response.data, "binary");
-            const sharp = (await import("sharp")).default;
-            buffer = await sharp(buffer).jpeg().toBuffer();
+            // اضبط التحويل لو حبيت؛ الافتراضي هنا: بدون sharp -> send buffer كما هو
+            // لو عندك sharp مثبت وتريد إعادة ترميز، فك التعليق التالي:
+            // const sharp = (await import("sharp")).default;
+            // buffer = await sharp(buffer).jpeg().toBuffer();
 
             await sock.sendMessage(jid, {
               image: buffer,
-              caption: text || ""
-            }, { thumbnail: null });
+              caption: text || "",
+              jpegThumbnail: null
+            });
 
             console.log(`[queue] Sent image (attempt ${attempt}) to ${phone}`);
           } else {
@@ -224,7 +255,18 @@ setInterval(async () => {
           sent = true;
           break;
         } catch (err) {
-          console.error(`[queue] Error attempt ${attempt} for ${phone}:`, err.message);
+          // لو رسالة الخطأ كانت Connection Closed معناها session انقفل أثناء الإرسال
+          console.error(`[queue] Error attempt ${attempt} for ${phone}:`, err?.message || err);
+
+          // إذا الخطأ Connection Closed — علشان مانحاولش نعيد نفس الـ socket الفاسد
+          if ((err?.message || "").toLowerCase().includes("connection closed")) {
+            console.log(`[queue] Detected Connection Closed while sending to ${phone}. Will try reconnect strategy.`);
+            // delete old session and kick reconnect for preferred (or same) session
+            try { delete sessions[sessionId]; } catch(e){/* ignore */}
+
+            const target = preferredSessionId || sessionId;
+            setTimeout(() => startSock(target).catch(e => console.error(`Reconnection error for ${target}:`, e?.message || e)), 3000);
+          }
         }
       }
 
@@ -240,7 +282,7 @@ setInterval(async () => {
       messageStatus[phone] = "sent";
     }
   } catch (err) {
-    console.error(`[queue] Fatal error sending to ${phone}:`, err.message);
+    console.error(`[queue] Fatal error sending to ${phone}:`, err?.message || err);
     messageStatus[phone] = "error";
   }
 }, 2000);
@@ -276,7 +318,14 @@ app.get("/", (req, res) => {
 const reconnectSessions = () => {
   try {
     if (fs.existsSync(AUTH_DIR)) {
-      const sessionFolders = fs.readdirSync(AUTH_DIR);
+      let sessionFolders = fs.readdirSync(AUTH_DIR);
+
+      // لو فيه preferredSessionId — نخليها في البداية لنعطيها أولوية
+      if (preferredSessionId) {
+        sessionFolders = sessionFolders.filter(s => s !== preferredSessionId);
+        sessionFolders.unshift(preferredSessionId);
+      }
+
       console.log(`Found ${sessionFolders.length} session(s) to reconnect.`);
       sessionFolders.forEach(sessionId => {
         console.log(`🚀 Reconnecting session: ${sessionId}`);
