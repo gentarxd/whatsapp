@@ -114,8 +114,69 @@ function requireApiKey(req, res, next) {
 }
 
 // =======================
-// Routes
+// Extra Routes
 // =======================
+
+// ✅ Check numbers if they exist on WhatsApp
+app.post("/check", requireApiKey, async (req, res) => {
+  try {
+    const { sessionId, numbers } = req.body;
+    if (!sessionId || !Array.isArray(numbers) || numbers.length === 0) {
+      return res.status(400).json({ error: "sessionId and numbers[] required" });
+    }
+
+    const sock = sessions[sessionId];
+    if (!sock) return res.status(404).json({ error: "session not found" });
+
+    const jids = numbers.map(num => num + "@s.whatsapp.net");
+    const results = await sock.onWhatsApp(jids);
+
+    const formatted = numbers.map(num => {
+      const jid = num + "@s.whatsapp.net";
+      const found = results.find(r => r.jid === jid);
+      return {
+        number: num,
+        exists: found?.exists || false
+      };
+    });
+
+    res.json({ sessionId, results: formatted });
+  } catch (err) {
+    console.error("/check error:", err?.message || err);
+    res.status(500).json({ error: "failed to check numbers" });
+  }
+});
+
+// ✅ Link number instead of QR (pairing code)
+app.post("/link-number", requireApiKey, async (req, res) => {
+  try {
+    const { sessionId, phone } = req.body;
+    if (!sessionId || !phone) {
+      return res.status(400).json({ error: "sessionId and phone required" });
+    }
+
+    const authFolder = `${AUTH_DIR}/${sessionId}`;
+    if (!fs.existsSync(authFolder)) fs.mkdirSync(authFolder, { recursive: true });
+
+    const { state, saveCreds } = await useMultiFileAuthState(authFolder);
+
+    const sock = makeWASocket({
+      printQRInTerminal: false,
+      auth: state,
+    });
+
+    sock.ev.on("creds.update", saveCreds);
+
+    const code = await sock.requestPairingCode(phone);
+    console.log(`Pairing code for ${phone}: ${code}`);
+
+    res.json({ sessionId, phone, code });
+  } catch (err) {
+    console.error("/link-number error:", err?.message || err);
+    res.status(500).json({ error: "failed to link number" });
+  }
+});
+
 
 app.post("/set-preferred-session", requireApiKey, (req, res) => {
   try {
