@@ -19,7 +19,9 @@ const AUTH_DIR = '/data/auth_info';
 const messageQueue = [];
 const messageStatus = {}; // { phone: "queued" | "sent" | "error" | "no_session" }
 
-// إنشاء الـ WhatsApp socket
+// =======================
+// Start WhatsApp Socket
+// =======================
 async function startSock(sessionId) {
   try {
     if (!sessionId) throw new Error("sessionId required for startSock");
@@ -46,7 +48,7 @@ async function startSock(sessionId) {
         sock.sendPresenceUpdate("available");
         console.log(`📡 KeepAlive ping sent for ${sessionId}`);
       }
-    }, 60 * 1000); // كل دقيقة
+    }, 60 * 1000);
 
     // حفظ الكريدينشالز
     sock.ev.on("creds.update", saveCreds);
@@ -96,6 +98,37 @@ async function startSock(sessionId) {
       }
     });
 
+    // ✅ LISTENER للرسائل الجديدة
+    sock.ev.on("messages.upsert", async (m) => {
+      try {
+        const msg = m.messages[0];
+        if (!msg.message) return;
+
+        const from = msg.key.remoteJid;
+        const text =
+          msg.message.conversation ||
+          msg.message.extendedTextMessage?.text ||
+          msg.message.imageMessage?.caption ||
+          null;
+
+        console.log(`💬 New message from ${from}: ${text}`);
+
+        // ابعت للـ webhook بتاع n8n
+        await axios.post(
+          "https://n8n-latest-znpr.onrender.com/webhook-test/909d7c73-112a-455b-988c-9f770852c8fa",
+          {
+            sessionId,
+            from,
+            text,
+            raw: msg
+          },
+          { timeout: 10000 }
+        );
+      } catch (err) {
+        console.error("❌ Error sending to n8n webhook:", err?.message || err);
+      }
+    });
+
     sessions[sessionId] = sock;
     return sock;
   } catch (err) {
@@ -104,7 +137,9 @@ async function startSock(sessionId) {
   }
 }
 
-// تحقق من API key إذا موجود
+// =======================
+// Middleware for API key
+// =======================
 function requireApiKey(req, res, next) {
   if (API_KEY) {
     const header = req.headers["x-api-key"];
@@ -114,10 +149,9 @@ function requireApiKey(req, res, next) {
 }
 
 // =======================
-// Extra Routes
+// Routes
 // =======================
 
-// ✅ Check numbers if they exist on WhatsApp
 app.post("/check", requireApiKey, async (req, res) => {
   try {
     const { sessionId, numbers } = req.body;
@@ -147,7 +181,6 @@ app.post("/check", requireApiKey, async (req, res) => {
   }
 });
 
-// ✅ Link number instead of QR (pairing code)
 app.post("/link-number", requireApiKey, async (req, res) => {
   try {
     const { sessionId, phone } = req.body;
@@ -176,7 +209,6 @@ app.post("/link-number", requireApiKey, async (req, res) => {
     res.status(500).json({ error: "failed to link number" });
   }
 });
-
 
 app.post("/set-preferred-session", requireApiKey, (req, res) => {
   try {
