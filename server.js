@@ -115,7 +115,7 @@ async function startSock(sessionId) {
 
         // ابعت للـ webhook بتاع n8n
         await axios.post(
-          "https://n8n-latest-znpr.onrender.com/webhook-test/909d7c73-112a-455b-988c-9f770852c8fa",
+          "https://n8n-latest-znpr.onrender.com/webhook/909d7c73-112a-455b-988c-9f770852c8fa",
           {
             sessionId,
             from,
