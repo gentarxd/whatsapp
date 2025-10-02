@@ -254,7 +254,41 @@ app.get("/get-qr/:sessionId", requireApiKey, async (req, res) => {
   }
 });
 
-// باقي routes للـ send-message, message-status, reconnect ... إلخ
-// (نفس الكود بتاعك بدون تعديل)
+//  Send Message
+app.post("/send-message", requireApiKey, async (req, res) => {
+  try {
+    const { sessionId, number, message } = req.body;
+    if (!sessionId || !number || !message)
+      return res.status(400).json({ error: "sessionId, number and message required" });
+
+    const session = sessions[sessionId];
+    if (!session) return res.status(404).json({ error: "session not found" });
+
+    await session.sendMessage(number + "@s.whatsapp.net", { text: message });
+    res.json({ success: true });
+  } catch (err) {
+    console.error("/send-message error:", err?.message || err);
+    res.status(500).json({ error: "failed to send message" });
+  }
+});
+
+// Message Status
+app.get("/message-status/:phone", requireApiKey, (req, res) => {
+  const { phone } = req.params;
+  const status = messageStatus[phone] || "unknown";
+  res.json({ phone, status });
+});
+
+// Reconnect Session
+app.post("/reconnect/:sessionId", requireApiKey, async (req, res) => {
+  const { sessionId } = req.params;
+  try {
+    await startSock(sessionId);
+    res.json({ message: "reconnect triggered", sessionId });
+  } catch (err) {
+    console.error("/reconnect error:", err?.message || err);
+    res.status(500).json({ error: "failed to reconnect" });
+  }
+});
 
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
