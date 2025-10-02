@@ -111,7 +111,9 @@ async function startSock(sessionId) {
 // =======================
 
 app.post("/create-session", async (req, res) => {
-  const { sessionId, webhookUrl } = req.body;
+  const body = req.body || {};
+  const { sessionId, webhookUrl } = body;
+
   if (!sessionId) {
     return res.status(400).json({ error: "sessionId is required" });
   }
@@ -129,6 +131,7 @@ app.post("/create-session", async (req, res) => {
     res.status(500).json({ success: false, error: "Failed to start session: " + e.message });
   }
 });
+
 
 app.get("/get-qr/:sessionId", async (req, res) => {
   const { sessionId } = req.params;
