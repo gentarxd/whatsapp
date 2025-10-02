@@ -1,8 +1,12 @@
+import "dotenv/config";
 import express from "express";
-import makeWASocket, { DisconnectReason, useMultiFileAuthState } from "@whiskeysockets/baileys";
+import makeWASocket, { DisconnectReason } from "@whiskeysockets/baileys";
 import axios from "axios";
-import fs from "fs";
 import QRCode from "qrcode";
+import { createClient } from "@supabase/supabase-js";
+
+// This version includes the /create-session endpoint and has no API key.
+// WARNING: This server is open to the public.
 
 const app = express();
 app.use(express.json());
@@ -10,177 +14,169 @@ app.use(express.json());
 const sessions = {};
 const qrCodes = {};
 const sessionStatus = {};
+const sessionConfig = {};
+
 const PORT = process.env.PORT || 3000;
-const API_KEY = process.env.API_KEY || null;
+const PREFERRED_SESSION_ID = process.env.PREFERRED_SESSION || null;
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_KEY;
+const DEFAULT_WEBHOOK_URL = process.env.DEFAULT_WEBHOOK_URL;
 
-// Base path for storing sessions (persistent in Render)
-const baseAuthPath = process.env.SESSION_DIR || "./auth_info";
+if (!SUPABASE_URL || !SUPABASE_KEY) {
+  console.error("FATAL: SUPABASE_URL and SUPABASE_KEY are required.");
+  process.exit(1);
+}
 
-// --- Helper: API key check ---
-function requireApiKey(req, res, next) {
-  if (API_KEY) {
-    const header = req.headers["x-api-key"];
-    if (header !== API_KEY) return res.status(401).json({ error: "unauthorized" });
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+async function loadSession(sessionId) {
+  const { data, error } = await supabase.from("baileys").select("data").eq("id", sessionId).single();
+  if (error && error.code !== 'PGRST116') {
+    console.error("Error loading session:", error.message);
+    return null;
   }
-  next();
+  return data?.data || null;
 }
 
-// --- Start socket ---
+async function saveSession(sessionId, authState) {
+  const { error } = await supabase.from("baileys").upsert({ id: sessionId, data: authState });
+  if (error) console.error("Error saving session:", error.message);
+}
+
 async function startSock(sessionId) {
-const authFolder = `${process.env.SESSION_DIR}/${sessionId}`;
-  if (!fs.existsSync(authFolder)) fs.mkdirSync(authFolder, { recursive: true });
+  try {
+    if (!sessionId) throw new Error("sessionId is required");
+    if (sessions[sessionId]) return sessions[sessionId];
 
-  const { state, saveCreds } = await useMultiFileAuthState(authFolder);
+    const savedAuth = await loadSession(sessionId);
+    const sock = makeWASocket({ printQRInTerminal: false, auth: savedAuth || undefined });
 
-  const sock = makeWASocket({
-    printQRInTerminal: false,
-    auth: state,
-  });
+    sock.ev.on("creds.update", async (creds) => {
+      await saveSession(sessionId, { creds, keys: sock.authState.keys });
+    });
 
-  sock.ev.on("creds.update", saveCreds);
+    const pingInterval = setInterval(() => {
+        if (sock?.ws?.readyState === 1) sock.sendPresenceUpdate("available");
+    }, 60 * 1000);
 
-  sock.ev.on("connection.update", (update) => {
-    const { connection, lastDisconnect, qr } = update;
-
-    if (qr) {
-      qrCodes[sessionId] = qr;
-      console.log(`QR generated for ${sessionId}`);
-    }
-
-    if (connection === "open") {
-      sessionStatus[sessionId] = "open";
-      console.log(`Session ${sessionId} connected`);
-      delete qrCodes[sessionId];
-    }
-
-    if (connection === "close") {
-      sessionStatus[sessionId] = "close";
-      console.log(`Session ${sessionId} closed`);
-
-      const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
-      if (shouldReconnect) {
-        console.log(`Reconnecting ${sessionId}...`);
-        startSock(sessionId);
+    sock.ev.on("connection.update", (update) => {
+      const { connection, lastDisconnect, qr } = update;
+      if (qr) {
+        qrCodes[sessionId] = qr;
+        sessionStatus[sessionId] = "qr";
       }
-    }
-  });
+      if (connection === "open") {
+        sessionStatus[sessionId] = "open";
+        console.log(`Session ${sessionId} connected ✅`);
+        delete qrCodes[sessionId];
+      }
+      if (connection === "close") {
+        const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
+        if (shouldReconnect) {
+          console.log(`🔄 Connection closed for ${sessionId}, attempting reconnect...`);
+          delete sessions[sessionId];
+          setTimeout(() => startSock(sessionId), 5000);
+        } else {
+          sessionStatus[sessionId] = "logged_out";
+          console.log(`Session ${sessionId} logged out.`);
+          clearInterval(pingInterval);
+          delete sessions[sessionId];
+        }
+      }
+    });
 
-  sessions[sessionId] = sock;
-  return sock;
+    sock.ev.on("messages.upsert", async (m) => {
+      const msg = m.messages[0];
+      const webhookUrl = sessionConfig[sessionId]?.webhookUrl || DEFAULT_WEBHOOK_URL;
+      if (!msg.message || !webhookUrl) return;
+
+      try {
+        await axios.post(webhookUrl, { sessionId, from: msg.key.remoteJid, text: msg.message.conversation || msg.message.extendedTextMessage?.text || null, raw: msg });
+      } catch (err) {
+        console.error(`❌ Error sending to webhook for ${sessionId}:`, err.message);
+      }
+    });
+
+    sessions[sessionId] = sock;
+    return sock;
+  } catch (err) {
+    console.error(`startSock error for ${sessionId}:`, err.message);
+    delete sessions[sessionId];
+    throw err;
+  }
 }
 
-// --- API Routes ---
+// =======================
+// Routes
+// =======================
 
-// ✅ Create new session (always generates QR if new)
-app.post("/create-session", requireApiKey, async (req, res) => {
-  const { sessionId } = req.body;
-  if (!sessionId) return res.status(400).json({ error: "sessionId required" });
+app.post("/create-session", async (req, res) => {
+  const { sessionId, webhookUrl } = req.body;
+  if (!sessionId) {
+    return res.status(400).json({ error: "sessionId is required" });
+  }
 
-  await startSock(sessionId);
-  res.json({ message: "Session created (scan QR if required)", sessionId });
-});
-
-// ✅ Connect existing session (reuse saved creds)
-app.post("/connect-session", requireApiKey, async (req, res) => {
-  const { sessionId } = req.body;
-  if (!sessionId) return res.status(400).json({ error: "sessionId required" });
+  sessionConfig[sessionId] = { webhookUrl };
 
   if (sessions[sessionId]) {
-    return res.json({ message: "Session already active", sessionId });
+    return res.status(200).json({ success: true, message: `Session '${sessionId}' already exists.` });
   }
 
-  await startSock(sessionId);
-  res.json({ message: "Session connected (or QR needed if expired)", sessionId });
+  try {
+    await startSock(sessionId);
+    res.status(200).json({ success: true, message: `Session '${sessionId}' is starting.` });
+  } catch (e) {
+    res.status(500).json({ success: false, error: "Failed to start session: " + e.message });
+  }
 });
 
-// ✅ Get QR code
-app.get("/get-qr/:sessionId", requireApiKey, async (req, res) => {
+app.get("/get-qr/:sessionId", async (req, res) => {
   const { sessionId } = req.params;
+  
+  const status = sessionStatus[sessionId];
   const qr = qrCodes[sessionId];
 
-  if (!qr && sessionStatus[sessionId] === "open") {
-    return res.json({ status: "success", message: "QR already scanned, session active" });
-  }
-
-  if (!qr) return res.status(404).json({ error: "No QR available" });
-
-  try {
-    const qrImage = await QRCode.toDataURL(qr);
-    const img = Buffer.from(qrImage.split(",")[1], "base64");
-
-    res.writeHead(200, {
-      "Content-Type": "image/png",
-      "Content-Length": img.length,
-    });
-    res.end(img);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ✅ Check session status
-app.get("/session-status/:sessionId", requireApiKey, (req, res) => {
-  const { sessionId } = req.params;
-  const status = sessionStatus[sessionId] || "not found";
-  res.json({ sessionId, status });
-});
-
-// ✅ Delete session
-app.delete("/delete-session/:sessionId", requireApiKey, (req, res) => {
-  const { sessionId } = req.params;
-
-  if (sessions[sessionId]) {
-    delete sessions[sessionId];
-  }
-
-  const authFolder = `${baseAuthPath}/${sessionId}`;
-  if (fs.existsSync(authFolder)) {
-    fs.rmSync(authFolder, { recursive: true, force: true });
-  }
-
-  delete qrCodes[sessionId];
-  delete sessionStatus[sessionId];
-
-  res.json({ message: "Session deleted", sessionId });
-});
-
-// ✅ Send message
-app.post("/send-message", requireApiKey, async (req, res) => {
-  const { sessionId, phone, text, imageUrl } = req.body;
-
-  if (!sessionId || !phone) 
-    return res.status(400).json({ error: "sessionId and phone required" });
-
-  const sock = sessions[sessionId];
-  if (!sock) 
-    return res.status(400).json({ error: "Invalid session ID" });
-
-  try {
-    const jid = `${phone}@s.whatsapp.net`;
-
-    if (imageUrl) {
-      const response = await axios.get(imageUrl, { responseType: "arraybuffer" });
-      const buffer = Buffer.from(response.data, "binary");
-
-      await sock.sendMessage(jid, { image: buffer, caption: text || "" });
-    } else {
-      await sock.sendMessage(jid, { text });
+  if (status === 'qr' && qr) {
+    try {
+      const qrImage = await QRCode.toDataURL(qr);
+      res.send(`<img src="${qrImage}" alt="Scan this QR code with WhatsApp" />`);
+    } catch (e) {
+      res.status(500).json({ error: "Error generating QR code image." });
     }
-
-    res.json({ 
-      status: "success", 
-      message: "Message sent successfully", 
-      phone 
-    });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
+  } else if (status === 'open') {
+    res.send("Session is already connected. No QR code available.");
+  } else {
+    res.status(202).json({ message: "QR code not ready yet. Please wait a few seconds and try again." });
   }
 });
 
-// ✅ Health check
-app.get('/', (req, res) => {
-  res.send('Server is running!');
+app.get("/status/:sessionId", (req, res) => {
+  res.json({ status: sessionStatus[req.params.sessionId] || "unknown" });
 });
 
-// Start server
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.post("/send", async (req, res) => {
+  const { sessionId, phone, text } = req.body;
+  const sock = sessions[sessionId];
+  
+  if (sock && sessionStatus[sessionId] === 'open') {
+    try {
+      await sock.sendMessage(phone + "@s.whatsapp.net", { text });
+      res.json({ success: true, message: "Message sent!" });
+    } catch (e) {
+      res.status(500).json({ success: false, error: e.message });
+    }
+  } else {
+    res.status(404).json({ success: false, error: `Session '${sessionId}' is not connected.` });
+  }
+});
+
+// Start Server
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+  if (PREFERRED_SESSION_ID) {
+    console.log(`Attempting to start preferred session: ${PREFERRED_SESSION_ID}`);
+    startSock(PREFERRED_SESSION_ID).catch(err => {
+      console.error(`Failed to start preferred session ${PREFERRED_SESSION_ID}:`, err.message);
+    });
+  }
+});

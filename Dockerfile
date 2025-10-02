@@ -1,9 +1,19 @@
-FROM node:22
+FROM node:20-slim
+
+# Set the working directory inside the container
 WORKDIR /app
+
+# Copy package files first to leverage Docker's build cache
 COPY package*.json ./
-RUN npm install
+
+# Use 'npm install' which is more flexible than 'npm ci' for this setup
+RUN npm install --only=production
+
+# Copy the rest of your application code
 COPY . .
-RUN mkdir -p /app/auth_info
-ENV AUTH_FOLDER=/app/auth_info
+
+# Expose the port your app runs on
 EXPOSE 3000
+
+# The command to start your application
 CMD ["node", "server.js"]
