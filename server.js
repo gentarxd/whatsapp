@@ -1,69 +1,66 @@
+import "dotenv/config"; // CHANGE: Loads .env file
 import express from "express";
 import makeWASocket, { DisconnectReason } from "@whiskeysockets/baileys";
 import axios from "axios";
-import fs from "fs";
 import QRCode from "qrcode";
 import { createClient } from "@supabase/supabase-js";
 
 const app = express();
 app.use(express.json());
 
+// Global state objects
 const sessions = {};
 const qrCodes = {};
 const sessionStatus = {};
+
+// Environment variables
 const PORT = process.env.PORT || 3000;
-const API_KEY = process.env.API_KEY || null;
+const API_KEY = process.env.API_KEY;
+const PREFERRED_SESSION_ID = process.env.PREFERRED_SESSION || null;
 
-let preferredSessionId = process.env.PREFERRED_SESSION || null; // ex: "P1WM"
-const AUTH_DIR = '/data/auth_info';
+// CHANGE 1: Remove ALL hardcoded secrets. They must come from your .env file.
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_KEY;
+const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL;
 
-const messageQueue = [];
-const messageStatus = {}; // { phone: "queued" | "sent" | "error" | "no_session" }
+// Check for required environment variables
+if (!SUPABASE_URL || !SUPABASE_KEY) {
+  console.error("FATAL: SUPABASE_URL and SUPABASE_KEY are required environment variables.");
+  process.exit(1);
+}
 
-// =======================
-// Supabase Config
-// =======================
-const SUPABASE_URL = process.env.SUPABASE_URL || "https://fbflyrvmbguezvdzgqaj.supabase.co";
-const SUPABASE_KEY = process.env.SUPABASE_KEY || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZiZmx5cnZtYmd1ZXp2ZHpncWFqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTkzODUyMDksImV4cCI6MjA3NDk2MTIwOX0.U9E2KQG3-CNyJaA5tacYdDfipyAFHtVLFoDm-zDc10w";
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// 🗄️ تحميل الجلسة من Supabase
-async function loadSession(sessionId) {
-  const { data, error } = await supabase
-    .from("baileys")
-    .select("data")
-    .eq("id", sessionId)
-    .single();
+// CHANGE 2: Add API Key authentication middleware
+function authenticate(req, res, next) {
+  const providedApiKey = req.headers['x-api-key'] || req.query.apiKey;
+  if (!API_KEY || providedApiKey === API_KEY) {
+    return next();
+  }
+  res.status(401).json({ error: "Unauthorized" });
+}
 
-  if (error) {
+// Supabase session functions
+async function loadSession(sessionId) {
+  const { data, error } = await supabase.from("baileys").select("data").eq("id", sessionId).single();
+  if (error && error.code !== 'PGRST116') { // PGRST116 = no rows found
     console.error("Error loading session:", error.message);
     return null;
   }
   return data?.data || null;
 }
 
-// 🗄️ حفظ الجلسة في Supabase
 async function saveSession(sessionId, authState) {
-  const { error } = await supabase
-    .from("baileys")
-    .upsert({ id: sessionId, data: authState });
-
+  const { error } = await supabase.from("baileys").upsert({ id: sessionId, data: authState });
   if (error) console.error("Error saving session:", error.message);
 }
 
-// =======================
-// Start WhatsApp Socket
-// =======================
+// Main WhatsApp connection logic
 async function startSock(sessionId) {
   try {
-    if (!sessionId) throw new Error("sessionId required for startSock");
+    if (!sessionId) throw new Error("sessionId is required");
+    if (sessions[sessionId]) return sessions[sessionId];
 
-    if (sessions[sessionId]) {
-      console.log(`Session ${sessionId} already exists, returning existing socket.`);
-      return sessions[sessionId];
-    }
-
-    // حمل الجلسة من Supabase
     const savedAuth = await loadSession(sessionId);
 
     const sock = makeWASocket({
@@ -71,145 +68,128 @@ async function startSock(sessionId) {
       auth: savedAuth || undefined,
     });
 
-    // ✅ حفظ الكريدينشالز في Supabase
     sock.ev.on("creds.update", async (creds) => {
       await saveSession(sessionId, { creds, keys: sock.authState.keys });
     });
 
-    // ✅ Keep-Alive Ping
     const pingInterval = setInterval(() => {
       if (sock?.ws?.readyState === 1) {
         sock.sendPresenceUpdate("available");
-        console.log(`📡 KeepAlive ping sent for ${sessionId}`);
       }
     }, 60 * 1000);
 
     sock.ev.on("connection.update", (update) => {
-      try {
-        const { connection, lastDisconnect, qr } = update;
+      const { connection, lastDisconnect, qr } = update;
 
-        if (qr) {
-          qrCodes[sessionId] = qr;
-          sessionStatus[sessionId] = "qr";
-          console.log(`QR generated for ${sessionId}`);
+      if (qr) {
+        qrCodes[sessionId] = qr;
+        sessionStatus[sessionId] = "qr";
+        console.log(`QR generated for ${sessionId}`);
+      }
+
+      if (connection === "open") {
+        sessionStatus[sessionId] = "open";
+        console.log(`Session ${sessionId} connected ✅`);
+        delete qrCodes[sessionId];
+      }
+
+      if (connection === "close") {
+        const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
+        if (shouldReconnect) {
+          console.log(`🔄 Connection closed, attempting reconnect in 5s...`);
+          delete sessions[sessionId];
+          setTimeout(() => startSock(sessionId).catch(e => console.error(`Reconnection error:`, e)), 5000);
+        } else {
+          sessionStatus[sessionId] = "logged_out";
+          console.log(`Session ${sessionId} logged out.`);
+          clearInterval(pingInterval);
+          delete sessions[sessionId];
         }
-
-        if (connection === "open") {
-          sessionStatus[sessionId] = "open";
-          console.log(`Session ${sessionId} connected ✅`);
-          delete qrCodes[sessionId];
-        }
-
-        if (connection === "close") {
-          sessionStatus[sessionId] = "close";
-          console.log(`Session ${sessionId} closed ❌`);
-
-          const shouldReconnect =
-            (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
-
-          if (shouldReconnect) {
-            const target = preferredSessionId || sessionId;
-            console.log(`🔄 Will attempt reconnect to "${target}" in 5s...`);
-
-            try { delete sessions[sessionId]; } catch (e) { /* ignore */ }
-
-            setTimeout(() => {
-              startSock(target).catch(e =>
-                console.error(`Reconnection error for ${target}:`, e?.message || e)
-              );
-            }, 5000);
-          } else {
-            sessionStatus[sessionId] = "logged_out";
-            console.log(`Session ${sessionId} logged out. تحتاج QR جديد`);
-            clearInterval(pingInterval);
-          }
-        }
-      } catch (e) {
-        console.error(`Error in connection.update handler for ${sessionId}:`, e?.message || e);
       }
     });
 
-    // ✅ LISTENER للرسائل الجديدة
     sock.ev.on("messages.upsert", async (m) => {
+      const msg = m.messages[0];
+      if (!msg.message || !N8N_WEBHOOK_URL) return;
+
       try {
-        const msg = m.messages[0];
-        if (!msg.message) return;
-
         const from = msg.key.remoteJid;
-        const text =
-          msg.message.conversation ||
-          msg.message.extendedTextMessage?.text ||
-          msg.message.imageMessage?.caption ||
-          null;
-
+        const text = msg.message.conversation || msg.message.extendedTextMessage?.text || null;
         console.log(`💬 New message from ${from}: ${text}`);
 
-        // ابعت للـ webhook بتاع n8n
-        await axios.post(
-          "https://n8n-latest-znpr.onrender.com/webhook/909d7c73-112a-455b-988c-9f770852c8fa",
-          {
-            sessionId,
-            from,
-            text,
-            raw: msg
-          },
-          { timeout: 10000 }
-        );
+        await axios.post(N8N_WEBHOOK_URL, { sessionId, from, text, raw: msg }, { timeout: 10000 });
       } catch (err) {
-        console.error("❌ Error sending to n8n webhook:", err?.message || err);
+        console.error("❌ Error sending to n8n webhook:", err?.message);
       }
     });
 
     sessions[sessionId] = sock;
     return sock;
+
   } catch (err) {
-    console.error(`startSock(${sessionId}) error:`, err?.message || err);
+    console.error(`startSock(${sessionId}) error:`, err?.message);
+    delete sessions[sessionId]; // Clean up failed session attempt
     throw err;
   }
 }
+
 
 // =======================
 // Routes
 // =======================
 
-// ✅ Generate QR
-app.get("/qr/:sessionId", async (req, res) => {
+app.get("/qr/:sessionId", authenticate, async (req, res) => {
   const { sessionId } = req.params;
   try {
     if (!sessions[sessionId]) {
       await startSock(sessionId);
     }
-    if (qrCodes[sessionId]) {
-      const qr = await QRCode.toDataURL(qrCodes[sessionId]);
-      return res.send(`<img src="${qr}" />`);
-    }
-    return res.send("No QR available, maybe already connected?");
+    // Wait a bit for the QR to generate
+    setTimeout(async () => {
+      if (qrCodes[sessionId]) {
+        const qr = await QRCode.toDataURL(qrCodes[sessionId]);
+        return res.send(`<img src="${qr}" alt="Scan this QR code with WhatsApp" />`);
+      }
+      res.send("No QR available. Check status or try again in a few seconds.");
+    }, 3000); // 3-second delay
   } catch (e) {
-    return res.status(500).send("Error: " + e.message);
+    res.status(500).send("Error starting session: " + e.message);
   }
 });
 
-// ✅ Session status
-app.get("/status/:sessionId", (req, res) => {
+app.get("/status/:sessionId", authenticate, (req, res) => {
   const { sessionId } = req.params;
-  return res.json({ status: sessionStatus[sessionId] || "unknown" });
+  res.json({ status: sessionStatus[sessionId] || "unknown" });
 });
 
-// ✅ Send Message
-app.post("/send", async (req, res) => {
+// CHANGE 3: Make the /send route more efficient
+app.post("/send", authenticate, async (req, res) => {
   const { sessionId, phone, text } = req.body;
-  try {
-    const sock = await startSock(sessionId);
-    await sock.sendMessage(phone + "@s.whatsapp.net", { text });
-    res.json({ success: true });
-  } catch (e) {
-    res.status(500).json({ success: false, error: e.message });
+  
+  const sock = sessions[sessionId];
+  const status = sessionStatus[sessionId];
+
+  if (sock && status === 'open') {
+    try {
+      const jid = phone + "@s.whatsapp.net";
+      await sock.sendMessage(jid, { text });
+      res.json({ success: true, message: "Message sent!" });
+    } catch (e) {
+      res.status(500).json({ success: false, error: e.message });
+    }
+  } else {
+    res.status(404).json({ success: false, error: `Session '${sessionId}' not connected. Status: ${status || 'unknown'}` });
   }
 });
 
-// =======================
 // Start Server
-// =======================
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
+  // CHANGE 4: Automatically start the preferred session
+  if (PREFERRED_SESSION_ID) {
+    console.log(`Attempting to start preferred session: ${PREFERRED_SESSION_ID}`);
+    startSock(PREFERRED_SESSION_ID).catch(err => {
+      console.error(`Failed to start preferred session ${PREFERRED_SESSION_ID}:`, err.message);
+    });
+  }
 });
