@@ -1,25 +1,16 @@
 {
-  "type": "module",
-  "name": "baileys-server",
+  "name": "whatsapp-bot",
   "version": "1.0.0",
-  "main": "index.js",
+  "main": "server.js",
+  "type": "module",
   "scripts": {
-    "start": "node index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
   "dependencies": {
-    "@hapi/boom": "^10.0.1",
-    "@whiskeysockets/baileys": "^6.7.19",
-    "axios": "^1.11.0",
-    "express": "^5.1.0",
-    "pino": "^9.9.4",
-    "qrcode": "^1.5.4"
-  },
-  "engines": {
-    "node": "22.x"
+    "@whiskeysockets/baileys": "^6.7.9",
+    "@supabase/supabase-js": "^2.45.1",
+    "axios": "^1.7.4",
+    "express": "^4.19.2",
+    "qrcode": "^1.5.3"
   }
 }
