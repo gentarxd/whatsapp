@@ -6,8 +6,8 @@ WORKDIR /app
 # Copy package files first to leverage Docker's build cache
 COPY package*.json ./
 
-# Use 'npm ci' for faster, more reliable installs in production
-RUN npm ci --only=production
+# Use 'npm install' which is more flexible than 'npm ci' for this setup
+RUN npm install --only=production
 
 # Copy the rest of your application code
 COPY . .
