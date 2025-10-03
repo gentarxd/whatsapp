@@ -1,55 +1,77 @@
-// server.js
 import express from "express";
-import makeWASocket, { useMultiFileAuthState, DisconnectReason } from "@whiskeysockets/baileys";
-import qrcode from "qrcode";
-import Pino from "pino";
+import makeWASocket, { DisconnectReason } from "@whiskeysockets/baileys";
 import axios from "axios";
-import { downloadMediaMessage } from "@whiskeysockets/baileys";
-import fs from "fs";
+import QRCode from "qrcode";
 
 const app = express();
 app.use(express.json());
 
-const sessions = {}; // نخزن السيشنات
+const sessions = {};       // لتخزين كل sockets الجارية
+const qrCodes = {};        // لتخزين QR codes لكل session
+const sessionStatus = {};  // حالة كل session: open, close, qr, logged_out
+const PORT = process.env.PORT || 3000;
+const API_KEY = process.env.API_KEY || null;
+
+const messageQueue = [];
+const messageStatus = {}; // حالة كل رسالة: queued | sent | error | no_session
 
 // =======================
-// Function لإنشاء Session
+// دالة لإنشاء WhatsApp socket in-memory
 // =======================
-async function createSession(sessionId, webhookUrl) {
-  const { state, saveCreds } = await useMultiFileAuthState(`./auth/${sessionId}`);
+async function startSock(sessionId) {
+  if (!sessionId) throw new Error("sessionId required");
+
+  if (sessions[sessionId]) return sessions[sessionId];
+
+  // **auth state in-memory**
+  const state = {}; 
+  const saveCreds = () => {}; // مش هنحفظ حاجة على القرص
 
   const sock = makeWASocket({
     printQRInTerminal: false,
     auth: state,
-    logger: Pino({ level: "silent" }),
   });
 
-  sessions[sessionId] = { sock, saveCreds, webhookUrl, qr: null };
+  // حفظ credentials في الذاكرة فقط
+  sock.ev.on("creds.update", saveCreds);
+
+  // Keep-Alive ping
+  const pingInterval = setInterval(() => {
+    if (sock?.ws?.readyState === 1) sock.sendPresenceUpdate("available");
+  }, 60 * 1000);
 
   // =======================
-  // Connection updates
+  // اتصال / إعادة اتصال
   // =======================
-  sock.ev.on("connection.update", async (update) => {
-    const { qr, connection, lastDisconnect } = update;
+  sock.ev.on("connection.update", (update) => {
+    const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
-      sessions[sessionId].qr = qr;
-      console.log("📲 QR Generated for session:", sessionId);
+      qrCodes[sessionId] = qr;
+      sessionStatus[sessionId] = "qr";
+      console.log(`QR generated for ${sessionId}`);
     }
 
     if (connection === "open") {
-      console.log("✅ WhatsApp Connected:", sessionId);
+      sessionStatus[sessionId] = "open";
+      console.log(`Session ${sessionId} connected ✅`);
+      delete qrCodes[sessionId];
     }
 
     if (connection === "close") {
-      const reason = lastDisconnect?.error?.output?.statusCode;
-      console.log("❌ Connection closed", reason, sessionId);
+      sessionStatus[sessionId] = "close";
+      console.log(`Session ${sessionId} closed ❌`);
 
-      if (reason !== DisconnectReason.loggedOut) {
-        setTimeout(() => {
-          console.log("🔄 Reconnecting session:", sessionId);
-          createSession(sessionId, webhookUrl);
-        }, 2000);
+      const shouldReconnect =
+        (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
+
+      if (shouldReconnect) {
+        console.log(`🔄 Will attempt reconnect to "${sessionId}" in 5s...`);
+        delete sessions[sessionId];
+        setTimeout(() => startSock(sessionId).catch(console.error), 5000);
+      } else {
+        sessionStatus[sessionId] = "logged_out";
+        clearInterval(pingInterval);
       }
     }
   });
@@ -57,137 +79,123 @@ async function createSession(sessionId, webhookUrl) {
   // =======================
   // استقبال الرسائل
   // =======================
- sock.ev.on("messages.upsert", async (m) => {
-  const msg = m.messages[0];
-  if (!msg?.message) return;
+  sock.ev.on("messages.upsert", async (m) => {
+    const msg = m.messages[0];
+    if (!msg.message) return;
 
-  const from = msg.key.remoteJid;
-  if (!from.endsWith("@s.whatsapp.net")) return;
+    const from = msg.key.remoteJid;
+    const text =
+      msg.message.conversation ||
+      msg.message.extendedTextMessage?.text ||
+      msg.message.imageMessage?.caption ||
+      null;
 
-  console.log("📩 New message from:", from);
+    console.log(`💬 New message from ${from}: ${text}`);
 
-  // استخراج النص أو نوع الرسالة
-  let text = "";
-  let type = Object.keys(msg.message)[0]; // نوع الرسالة: conversation, imageMessage, etc.
-  let mediaData = null;
-
-  switch (type) {
-    case "conversation":
-      text = msg.message.conversation;
-      break;
-    case "extendedTextMessage":
-      text = msg.message.extendedTextMessage.text;
-      break;
-    case "imageMessage":
-    case "videoMessage":
-    case "documentMessage":
-    case "audioMessage":
-      mediaData = msg.message[type];
-      text = mediaData.caption || ""; // لو فيه caption
-      break;
-    default:
-      text = "";
-  }
-
-  // إرسال للـ webhook
-  if (webhookUrl) {
+    // إرسال للـ webhook
     try {
-      await axios.post(webhookUrl, {
-        sessionId,
-        from,
-        type,
-        text,
-        media: mediaData ? mediaData : null,
-      });
+      await axios.post(
+        "https://n8n-latest-znpr.onrender.com/webhook/909d7c73-112a-455b-988c-9f770852c8fa",
+        { sessionId, from, text, raw: msg },
+        { timeout: 10000 }
+      );
     } catch (err) {
-      console.error("Webhook error:", err.response?.data || err.message);
+      console.error("❌ Error sending to n8n webhook:", err?.message || err);
     }
-  }
-});
+  });
 
-
-  // =======================
-  // حفظ الـ credentials
-  // =======================
-  sock.ev.on("creds.update", saveCreds);
-
+  sessions[sessionId] = sock;
   return sock;
 }
 
 // =======================
-// API لإنشاء Session
+// Middleware API Key
 // =======================
-app.post("/create-session", async (req, res) => {
+function requireApiKey(req, res, next) {
+  if (API_KEY && req.headers["x-api-key"] !== API_KEY) return res.status(401).json({ error: "unauthorized" });
+  next();
+}
+
+// =======================
+// Routes
+// =======================
+app.post("/create-session", requireApiKey, async (req, res) => {
   try {
-    const { sessionId, webhookUrl } = req.body;
+    const { sessionId } = req.body;
     if (!sessionId) return res.status(400).json({ error: "sessionId required" });
 
-    await createSession(sessionId, webhookUrl);
-    res.json({ sessionId, message: "Session created. Open /qr/:sessionId to scan QR" });
+    await startSock(sessionId);
+    res.json({ message: "session created", sessionId });
   } catch (err) {
-    console.error("Create session error:", err);
+    console.error("/create-session error:", err?.message || err);
     res.status(500).json({ error: "failed to create session" });
   }
 });
 
-// =======================
-// API لإرجاع QR
-// =======================
-app.get("/qr/:sessionId", async (req, res) => {
+app.get("/get-qr/:sessionId", requireApiKey, async (req, res) => {
   const { sessionId } = req.params;
-  const session = sessions[sessionId];
-  if (!session || !session.qr) return res.status(404).json({ error: "QR not available" });
+  const qr = qrCodes[sessionId];
+
+  if (!qr && sessionStatus[sessionId] === "open") {
+    return res.json({ status: "success", message: "QR already scanned, session active" });
+  }
+
+  if (!qr) return res.status(404).json({ error: "No QR available" });
 
   try {
-    const qrImage = await qrcode.toBuffer(session.qr);
-    res.writeHead(200, {
-      "Content-Type": "image/png",
-      "Content-Length": qrImage.length,
-    });
-    res.end(qrImage);
+    const qrImage = await QRCode.toDataURL(qr);
+    const img = Buffer.from(qrImage.split(",")[1], "base64");
+    res.writeHead(200, { "Content-Type": "image/png", "Content-Length": img.length });
+    res.end(img);
   } catch (err) {
-    console.error("QR generation error:", err);
-    res.status(500).json({ error: "failed to generate QR" });
+    console.error("QR generation error:", err?.message || err);
+    res.status(500).json({ error: "failed to generate qr" });
   }
 });
 
-// =======================
-// API لإرسال رسالة
-// =======================
-app.post("/send-message", async (req, res) => {
-  try {
-    const { sessionId, to, message } = req.body;
-    const session = sessions[sessionId];
-    if (!session || !session.sock) return res.status(404).json({ error: "Session not found" });
+app.post("/send-message", requireApiKey, async (req, res) => {
+  const { sessionId, phone, text } = req.body;
+  if (!sessionId || !phone) return res.status(400).json({ error: "sessionId and phone required" });
 
-    if (!message || !message.toString().trim()) return res.status(400).json({ error: "Message is empty" });
-
-    const jid = to.replace(/\D/g, "") + "@s.whatsapp.net";
-    const text = message.toString().trim() || " ";
-
-    let attempt = 0;
-    const maxAttempts = 2;
-
-    while (attempt < maxAttempts) {
-      try {
-        await session.sock.sendMessage(jid, { text });
-        return res.json({ success: true, to: jid });
-      } catch (err) {
-        attempt++;
-        console.error(`Attempt ${attempt} failed:`, err.message);
-        if (attempt >= maxAttempts) throw err;
-        console.log("Retrying...");
-      }
-    }
-
-  } catch (err) {
-    console.error("Send error full:", err);
-    res.status(500).json({ error: "failed to send message", details: err.message });
-  }
+  messageQueue.push({ sessionId, phone, text });
+  messageStatus[phone] = "queued";
+  res.json({ status: "queued", phone });
 });
 
 // =======================
-// تشغيل السيرفر
+// معالجة الـ Queue
 // =======================
-const PORT = process.env.PORT || 3000;
+setInterval(async () => {
+  if (messageQueue.length === 0) return;
+  const { sessionId, phone, text } = messageQueue.shift();
+  const sock = sessions[sessionId];
+  if (!sock) {
+    messageStatus[phone] = "no_session";
+    return;
+  }
+
+  try {
+    await sock.sendMessage(`${phone}@s.whatsapp.net`, { text });
+    messageStatus[phone] = "sent";
+    console.log(`[queue] Sent text to ${phone}`);
+  } catch (err) {
+    messageStatus[phone] = "error";
+    console.error(`[queue] Failed to send to ${phone}:`, err?.message || err);
+  }
+}, 2000);
+
+// =======================
+// الحالة
+// =======================
+app.get("/status/:sessionId", requireApiKey, (req, res) => {
+  const { sessionId } = req.params;
+  res.json({ sessionId, status: sessionStatus[sessionId] || "not_found" });
+});
+
+app.get("/message-status", requireApiKey, (req, res) => res.json(messageStatus));
+app.get("/", (req, res) => res.send("Server is running!"));
+
+// =======================
+// بدء السيرفر
+// =======================
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
