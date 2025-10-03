@@ -1,6 +1,6 @@
 // server.js
 import express from "express";
-import makeWASocket, { DisconnectReason, useMultiFileAuthState } from "@whiskeysockets/baileys";
+import makeWASocket, { useMultiFileAuthState } from "@whiskeysockets/baileys";
 import qrcode from "qrcode";
 import Pino from "pino";
 import axios from "axios";
@@ -34,8 +34,7 @@ app.post("/create-session", async (req, res) => {
       const { qr, connection, lastDisconnect } = update;
 
       if (qr) {
-        const qrImageUrl = await qrcode.toDataURL(qr);
-        sessions[sessionId].qr = qrImageUrl;
+        sessions[sessionId].qr = qr; // نخزن الكود الخام (مش image)
         console.log("📲 QR Generated for session:", sessionId);
       }
 
@@ -44,12 +43,11 @@ app.post("/create-session", async (req, res) => {
       }
 
       if (connection === "close") {
-        const reason = lastDisconnect?.error?.output?.statusCode;
-        console.log("❌ Connection closed", reason, sessionId);
+        console.log("❌ Connection closed", lastDisconnect?.error);
       }
     });
 
-    // ✅ لو في رسالة جديدة
+    // ✅ استقبال الرسائل
     sock.ev.on("messages.upsert", async (m) => {
       const msg = m.messages[0];
       if (!msg.message) return;
@@ -65,24 +63,48 @@ app.post("/create-session", async (req, res) => {
       }
     });
 
-    // ✅ لازم تحفظ الـ creds
+    // ✅ حفظ الـ credentials
     sock.ev.on("creds.update", saveCreds);
 
-    res.json({ sessionId, message: "Session created. Scan QR with /qr/:sessionId" });
+    res.json({ 
+      sessionId, 
+      message: "Session created. Open /qr/:sessionId to scan QR" 
+    });
   } catch (err) {
     console.error("Create session error:", err);
     res.status(500).json({ error: "failed to create session" });
   }
 });
 
+// ✅ API لإرجاع QR كصورة
+app.get("/qr/:sessionId", async (req, res) => {
+  const { sessionId } = req.params;
+  const session = sessions[sessionId];
+  if (!session || !session.qr) {
+    return res.status(404).json({ error: "QR not available" });
+  }
 
+  try {
+    const qrImage = await qrcode.toBuffer(session.qr);
+    res.writeHead(200, {
+      "Content-Type": "image/png",
+      "Content-Length": qrImage.length,
+    });
+    res.end(qrImage);
+  } catch (err) {
+    console.error("QR generation error:", err);
+    res.status(500).json({ error: "failed to generate QR" });
+  }
+});
+
+// ✅ API لإرسال رسالة
 app.post("/send-message", async (req, res) => {
   try {
     const { sessionId, to, message } = req.body;
     const session = sessions[sessionId];
     if (!session) return res.status(404).json({ error: "Session not found" });
 
-    await session.sock.sendMessage(to, { text: message });
+    await session.sock.sendMessage(to + "@s.whatsapp.net", { text: message });
     res.json({ success: true });
   } catch (err) {
     console.error("Send error:", err);
