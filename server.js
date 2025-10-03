@@ -4,6 +4,20 @@ import makeWASocket, { useMultiFileAuthState, DisconnectReason } from "@whiskeys
 import qrcode from "qrcode";
 import Pino from "pino";
 import axios from "axios";
+import { downloadMediaMessage } from "@whiskeysockets/baileys";
+import fs from "fs";
+
+if (mediaData) {
+  try {
+    const buffer = await downloadMediaMessage(msg, "buffer", {}, { logger: Pino({ level: "silent" }), auth: sock.authState });
+    const filename = `media/${msg.key.id}_${type}`;
+    fs.writeFileSync(filename, buffer);
+    console.log("📁 Media saved:", filename);
+  } catch (err) {
+    console.error("Failed to download media:", err.message);
+  }
+}
+
 
 const app = express();
 app.use(express.json());
@@ -55,30 +69,54 @@ async function createSession(sessionId, webhookUrl) {
   // =======================
   // استقبال الرسائل
   // =======================
-  sock.ev.on("messages.upsert", async (m) => {
-    const msg = m.messages[0];
-    if (!msg?.message) return;
+ sock.ev.on("messages.upsert", async (m) => {
+  const msg = m.messages[0];
+  if (!msg?.message) return;
 
-    const from = msg.key.remoteJid;
+  const from = msg.key.remoteJid;
+  if (!from.endsWith("@s.whatsapp.net")) return;
 
-    // تجاهل broadcast/newsletter
-    if (!from.endsWith("@s.whatsapp.net")) return;
+  console.log("📩 New message from:", from);
 
-    console.log("📩 New message from:", from);
+  // استخراج النص أو نوع الرسالة
+  let text = "";
+  let type = Object.keys(msg.message)[0]; // نوع الرسالة: conversation, imageMessage, etc.
+  let mediaData = null;
 
-    // إرسال للـ webhook فقط لو موجود
-    if (webhookUrl) {
-      try {
-        await axios.post(webhookUrl, {
-          sessionId,
-          from,
-          text: msg.message.conversation || "",
-        });
-      } catch (err) {
-        console.error("Webhook error:", err.message);
-      }
+  switch (type) {
+    case "conversation":
+      text = msg.message.conversation;
+      break;
+    case "extendedTextMessage":
+      text = msg.message.extendedTextMessage.text;
+      break;
+    case "imageMessage":
+    case "videoMessage":
+    case "documentMessage":
+    case "audioMessage":
+      mediaData = msg.message[type];
+      text = mediaData.caption || ""; // لو فيه caption
+      break;
+    default:
+      text = "";
+  }
+
+  // إرسال للـ webhook
+  if (webhookUrl) {
+    try {
+      await axios.post(webhookUrl, {
+        sessionId,
+        from,
+        type,
+        text,
+        media: mediaData ? mediaData : null,
+      });
+    } catch (err) {
+      console.error("Webhook error:", err.response?.data || err.message);
     }
-  });
+  }
+});
+
 
   // =======================
   // حفظ الـ credentials
