@@ -7,18 +7,6 @@ import axios from "axios";
 import { downloadMediaMessage } from "@whiskeysockets/baileys";
 import fs from "fs";
 
-if (mediaData) {
-  try {
-    const buffer = await downloadMediaMessage(msg, "buffer", {}, { logger: Pino({ level: "silent" }), auth: sock.authState });
-    const filename = `media/${msg.key.id}_${type}`;
-    fs.writeFileSync(filename, buffer);
-    console.log("📁 Media saved:", filename);
-  } catch (err) {
-    console.error("Failed to download media:", err.message);
-  }
-}
-
-
 const app = express();
 app.use(express.json());
 
