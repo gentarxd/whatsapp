@@ -1,50 +1,55 @@
 import express from "express";
-import makeWASocket, { DisconnectReason } from "@whiskeysockets/baileys";
+import makeWASocket from "@whiskeysockets/baileys";
 import axios from "axios";
+import Pino from "pino";
 import QRCode from "qrcode";
 
 const app = express();
 app.use(express.json());
 
-const sessions = {};       // لتخزين كل sockets الجارية
-const qrCodes = {};        // لتخزين QR codes لكل session
-const sessionStatus = {};  // حالة كل session: open, close, qr, logged_out
 const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.API_KEY || null;
 
-const messageQueue = [];
-const messageStatus = {}; // حالة كل رسالة: queued | sent | error | no_session
+// =======================
+// In-memory sessions
+// =======================
+const sessions = {};       // sessionId -> socket
+const qrCodes = {};        // sessionId -> qr
+const sessionStatus = {};  // sessionId -> "qr" | "open" | "close"
 
 // =======================
-// دالة لإنشاء WhatsApp socket in-memory
+// Middleware API key
+// =======================
+function requireApiKey(req, res, next) {
+  if (API_KEY) {
+    const key = req.headers["x-api-key"];
+    if (key !== API_KEY) return res.status(401).json({ error: "unauthorized" });
+  }
+  next();
+}
+
+// =======================
+// Start WhatsApp Socket (in-memory)
 // =======================
 async function startSock(sessionId) {
   if (!sessionId) throw new Error("sessionId required");
 
-  if (sessions[sessionId]) return sessions[sessionId];
-
-  // **auth state in-memory**
-  const state = {}; 
-  const saveCreds = () => {}; // مش هنحفظ حاجة على القرص
+  // In-memory auth
+  const authState = {
+    creds: {},
+    keys: { get: async () => ({}), set: async () => {}, remove: async () => {} }
+  };
 
   const sock = makeWASocket({
     printQRInTerminal: false,
-    auth: state,
+    auth: authState,
+    logger: Pino({ level: "silent" }),
   });
 
-  // حفظ credentials في الذاكرة فقط
-  sock.ev.on("creds.update", saveCreds);
+  sessions[sessionId] = sock;
 
-  // Keep-Alive ping
-  const pingInterval = setInterval(() => {
-    if (sock?.ws?.readyState === 1) sock.sendPresenceUpdate("available");
-  }, 60 * 1000);
-
-  // =======================
-  // اتصال / إعادة اتصال
-  // =======================
   sock.ev.on("connection.update", (update) => {
-    const { connection, lastDisconnect, qr } = update;
+    const { connection, qr } = update;
 
     if (qr) {
       qrCodes[sessionId] = qr;
@@ -61,34 +66,20 @@ async function startSock(sessionId) {
     if (connection === "close") {
       sessionStatus[sessionId] = "close";
       console.log(`Session ${sessionId} closed ❌`);
-
-      const shouldReconnect =
-        (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
-
-      if (shouldReconnect) {
-        console.log(`🔄 Will attempt reconnect to "${sessionId}" in 5s...`);
-        delete sessions[sessionId];
-        setTimeout(() => startSock(sessionId).catch(console.error), 5000);
-      } else {
-        sessionStatus[sessionId] = "logged_out";
-        clearInterval(pingInterval);
-      }
+      delete sessions[sessionId];
     }
   });
 
-  // =======================
-  // استقبال الرسائل
-  // =======================
   sock.ev.on("messages.upsert", async (m) => {
     const msg = m.messages[0];
-    if (!msg.message) return;
+    if (!msg?.message) return;
 
     const from = msg.key.remoteJid;
     const text =
       msg.message.conversation ||
       msg.message.extendedTextMessage?.text ||
       msg.message.imageMessage?.caption ||
-      null;
+      "";
 
     console.log(`💬 New message from ${from}: ${text}`);
 
@@ -104,32 +95,24 @@ async function startSock(sessionId) {
     }
   });
 
-  sessions[sessionId] = sock;
   return sock;
 }
 
 // =======================
-// Middleware API Key
+// API Routes
 // =======================
-function requireApiKey(req, res, next) {
-  if (API_KEY && req.headers["x-api-key"] !== API_KEY) return res.status(401).json({ error: "unauthorized" });
-  next();
-}
 
-// =======================
-// Routes
-// =======================
-app.post("/create-session", requireApiKey, async (req, res) => {
-  try {
-    const { sessionId } = req.body;
-    if (!sessionId) return res.status(400).json({ error: "sessionId required" });
+app.post("/create-session", requireApiKey, (req, res) => {
+  const { sessionId } = req.body;
+  if (!sessionId) return res.status(400).json({ error: "sessionId required" });
 
-    await startSock(sessionId);
-    res.json({ message: "session created", sessionId });
-  } catch (err) {
-    console.error("/create-session error:", err?.message || err);
-    res.status(500).json({ error: "failed to create session" });
-  }
+  // Response سريع
+  res.json({ message: "Session creation started", sessionId });
+
+  // Start in background
+  startSock(sessionId).catch(err =>
+    console.error("startSock error:", err?.message || err)
+  );
 });
 
 app.get("/get-qr/:sessionId", requireApiKey, async (req, res) => {
@@ -154,48 +137,27 @@ app.get("/get-qr/:sessionId", requireApiKey, async (req, res) => {
 });
 
 app.post("/send-message", requireApiKey, async (req, res) => {
-  const { sessionId, phone, text } = req.body;
-  if (!sessionId || !phone) return res.status(400).json({ error: "sessionId and phone required" });
+  try {
+    const { sessionId, phone, text } = req.body;
+    if (!sessionId || !phone) return res.status(400).json({ error: "sessionId and phone required" });
 
-  messageQueue.push({ sessionId, phone, text });
-  messageStatus[phone] = "queued";
-  res.json({ status: "queued", phone });
+    const sock = sessions[sessionId];
+    if (!sock) return res.status(404).json({ error: "Session not found" });
+
+    const jid = `${phone}@s.whatsapp.net`;
+    await sock.sendMessage(jid, { text: text || " " });
+    res.json({ success: true, to: jid });
+  } catch (err) {
+    console.error("/send-message error:", err?.message || err);
+    res.status(500).json({ error: "failed to send message" });
+  }
 });
 
-// =======================
-// معالجة الـ Queue
-// =======================
-setInterval(async () => {
-  if (messageQueue.length === 0) return;
-  const { sessionId, phone, text } = messageQueue.shift();
-  const sock = sessions[sessionId];
-  if (!sock) {
-    messageStatus[phone] = "no_session";
-    return;
-  }
-
-  try {
-    await sock.sendMessage(`${phone}@s.whatsapp.net`, { text });
-    messageStatus[phone] = "sent";
-    console.log(`[queue] Sent text to ${phone}`);
-  } catch (err) {
-    messageStatus[phone] = "error";
-    console.error(`[queue] Failed to send to ${phone}:`, err?.message || err);
-  }
-}, 2000);
-
-// =======================
-// الحالة
-// =======================
 app.get("/status/:sessionId", requireApiKey, (req, res) => {
   const { sessionId } = req.params;
   res.json({ sessionId, status: sessionStatus[sessionId] || "not_found" });
 });
 
-app.get("/message-status", requireApiKey, (req, res) => res.json(messageStatus));
 app.get("/", (req, res) => res.send("Server is running!"));
 
-// =======================
-// بدء السيرفر
-// =======================
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
