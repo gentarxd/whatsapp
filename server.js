@@ -75,9 +75,7 @@ app.post("/create-session", async (req, res) => {
   }
 });
 
-// ✅ API تجيب QR
-V
-// ✅ API لإرسال رسالة
+
 app.post("/send-message", async (req, res) => {
   try {
     const { sessionId, to, message } = req.body;
