@@ -76,13 +76,7 @@ app.post("/create-session", async (req, res) => {
 });
 
 // ✅ API تجيب QR
-app.get("/qr/:sessionId", (req, res) => {
-  const { sessionId } = req.params;
-  const session = sessions[sessionId];
-  if (!session || !session.qr) return res.status(404).json({ error: "QR not found" });
-  res.json({ qr: session.qr });
-});
-
+V
 // ✅ API لإرسال رسالة
 app.post("/send-message", async (req, res) => {
   try {
