@@ -1,8 +1,8 @@
 import express from "express";
-import makeWASocket from "@whiskeysockets/baileys";
-import axios from "axios";
+import makeWASocket, { DisconnectReason } from "@whiskeysockets/baileys";
 import Pino from "pino";
 import QRCode from "qrcode";
+import axios from "axios";
 
 const app = express();
 app.use(express.json());
@@ -13,8 +13,8 @@ const API_KEY = process.env.API_KEY || null;
 // =======================
 // In-memory sessions
 // =======================
-const sessions = {};       // sessionId -> socket
-const qrCodes = {};        // sessionId -> qr
+const sessions = {};       // sessionId -> sock
+const qrCodes = {};        // sessionId -> QR
 const sessionStatus = {};  // sessionId -> "qr" | "open" | "close"
 
 // =======================
@@ -29,15 +29,19 @@ function requireApiKey(req, res, next) {
 }
 
 // =======================
-// Start WhatsApp Socket (in-memory, no auth files)
+// Start WhatsApp Socket
 // =======================
 async function startSock(sessionId) {
   if (!sessionId) throw new Error("sessionId required");
 
-  // In-memory auth (لا يخزن على disk)
+  // In-memory auth (لا يخزن على القرص)
   const authState = {
     creds: {},
-    keys: { get: async () => ({}), set: async () => {}, remove: async () => {} }
+    keys: {
+      get: async () => ({}),
+      set: async () => {},
+      remove: async () => {}
+    }
   };
 
   const sock = makeWASocket({
@@ -48,7 +52,6 @@ async function startSock(sessionId) {
 
   sessions[sessionId] = sock;
 
-  // Connection updates
   sock.ev.on("connection.update", (update) => {
     const { connection, qr } = update;
 
@@ -71,62 +74,42 @@ async function startSock(sessionId) {
     }
   });
 
-  // Messages listener (text + files)
   sock.ev.on("messages.upsert", async (m) => {
+    const msg = m.messages[0];
+    if (!msg?.message) return;
+
+    const from = msg.key.remoteJid;
+    const type = Object.keys(msg.message)[0];
+    let text = "";
+    let media = null;
+
+    switch (type) {
+      case "conversation":
+        text = msg.message.conversation;
+        break;
+      case "extendedTextMessage":
+        text = msg.message.extendedTextMessage.text;
+        break;
+      case "imageMessage":
+      case "videoMessage":
+      case "documentMessage":
+      case "audioMessage":
+        media = msg.message[type];
+        text = media.caption || "";
+        break;
+    }
+
+    console.log(`💬 New message from ${from}: ${text || type}`);
+
+    // إرسال للـ webhook
     try {
-      const msg = m.messages[0];
-      if (!msg?.message) return;
-
-      const from = msg.key.remoteJid;
-
-      // Determine message type
-      const type = Object.keys(msg.message)[0];
-      let text = "";
-      let mediaBuffer = null;
-      let mediaMime = null;
-      let mediaName = null;
-
-      switch (type) {
-        case "conversation":
-          text = msg.message.conversation;
-          break;
-        case "extendedTextMessage":
-          text = msg.message.extendedTextMessage.text;
-          break;
-        case "imageMessage":
-        case "videoMessage":
-        case "audioMessage":
-        case "documentMessage":
-          text = msg.message[type].caption || "";
-          mediaMime = msg.message[type].mimetype || null;
-          mediaName = msg.message[type].fileName || msg.key.id;
-
-          // Download media in-memory
-          mediaBuffer = await sock.downloadMediaMessage(msg, "buffer");
-          break;
-        default:
-          text = "";
-      }
-
-      console.log(`💬 New message from ${from}: ${text} | type: ${type}`);
-
-      // Send to webhook (base64 for media)
       await axios.post(
-        "https://n8n-latest-znpr.onrender.com/webhook/909d7c73-112a-455b-988c-9f770852c8fa",
-        {
-          sessionId,
-          from,
-          type,
-          text,
-          media: mediaBuffer ? mediaBuffer.toString("base64") : null,
-          mediaMime,
-          mediaName,
-        },
-        { timeout: 20000 }
+        "https://n8n-production-394a.up.railway.app/webhook/909d7c73-112a-455b-988c-9f770852c8fa",
+        { sessionId, from, text, type, media },
+        { timeout: 10000 }
       );
-
     } catch (err) {
-      console.error("❌ Error sending media to webhook:", err?.message || err);
+      console.error("❌ Error sending to n8n webhook:", err?.message || err);
     }
   });
 
@@ -142,9 +125,9 @@ app.post("/create-session", requireApiKey, async (req, res) => {
     const { sessionId } = req.body;
     if (!sessionId) return res.status(400).json({ error: "sessionId required" });
 
-    const sockPromise = startSock(sessionId);
+    startSock(sessionId);
 
-    // Track QR
+    // تابع الـ QR
     let qrTimeout;
     const qrPromise = new Promise((resolve, reject) => {
       const checkQR = () => {
@@ -159,19 +142,17 @@ app.post("/create-session", requireApiKey, async (req, res) => {
         }
       };
       checkQR();
-
       qrTimeout = setTimeout(() => reject(new Error("QR not generated in time")), 20000);
     });
 
     const qr = await qrPromise;
-    await sockPromise;
-
     if (qr) {
       const qrImage = await QRCode.toDataURL(qr);
       res.json({ sessionId, qr: qrImage });
     } else {
       res.json({ sessionId, message: "Session already active, no QR needed" });
     }
+
   } catch (err) {
     console.error("/create-session error:", err?.message || err);
     res.status(500).json({ error: "failed to create session" });
