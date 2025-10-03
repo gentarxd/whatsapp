@@ -43,7 +43,6 @@ async function createSession(sessionId, webhookUrl) {
       const reason = lastDisconnect?.error?.output?.statusCode;
       console.log("❌ Connection closed", reason, sessionId);
 
-      // إعادة الاتصال تلقائيًا إلا لو كان logout
       if (reason !== DisconnectReason.loggedOut) {
         setTimeout(() => {
           console.log("🔄 Reconnecting session:", sessionId);
@@ -58,16 +57,26 @@ async function createSession(sessionId, webhookUrl) {
   // =======================
   sock.ev.on("messages.upsert", async (m) => {
     const msg = m.messages[0];
-    if (!msg.message) return;
+    if (!msg?.message) return;
 
-    console.log("📩 New message from:", msg.key.remoteJid);
+    const from = msg.key.remoteJid;
 
+    // تجاهل broadcast/newsletter
+    if (!from.endsWith("@s.whatsapp.net")) return;
+
+    console.log("📩 New message from:", from);
+
+    // إرسال للـ webhook فقط لو موجود
     if (webhookUrl) {
-      await axios.post(webhookUrl, {
-        sessionId,
-        from: msg.key.remoteJid,
-        text: msg.message.conversation || null,
-      }).catch(e => console.error("Webhook error:", e.message));
+      try {
+        await axios.post(webhookUrl, {
+          sessionId,
+          from,
+          text: msg.message.conversation || "",
+        });
+      } catch (err) {
+        console.error("Webhook error:", err.message);
+      }
     }
   });
 
@@ -88,10 +97,7 @@ app.post("/create-session", async (req, res) => {
     if (!sessionId) return res.status(400).json({ error: "sessionId required" });
 
     await createSession(sessionId, webhookUrl);
-    res.json({ 
-      sessionId, 
-      message: "Session created. Open /qr/:sessionId to scan QR" 
-    });
+    res.json({ sessionId, message: "Session created. Open /qr/:sessionId to scan QR" });
   } catch (err) {
     console.error("Create session error:", err);
     res.status(500).json({ error: "failed to create session" });
@@ -126,18 +132,36 @@ app.post("/send-message", async (req, res) => {
   try {
     const { sessionId, to, message } = req.body;
     const session = sessions[sessionId];
-    if (!session) return res.status(404).json({ error: "Session not found" });
+    if (!session || !session.sock) return res.status(404).json({ error: "Session not found" });
 
-    await session.sock.sendMessage(to + "@s.whatsapp.net", { text: message });
-    res.json({ success: true });
+    if (!message || !message.toString().trim()) return res.status(400).json({ error: "Message is empty" });
+
+    const jid = to.replace(/\D/g, "") + "@s.whatsapp.net";
+    const text = message.toString().trim() || " ";
+
+    let attempt = 0;
+    const maxAttempts = 2;
+
+    while (attempt < maxAttempts) {
+      try {
+        await session.sock.sendMessage(jid, { text });
+        return res.json({ success: true, to: jid });
+      } catch (err) {
+        attempt++;
+        console.error(`Attempt ${attempt} failed:`, err.message);
+        if (attempt >= maxAttempts) throw err;
+        console.log("Retrying...");
+      }
+    }
+
   } catch (err) {
-    console.error("Send error:", err);
-    res.status(500).json({ error: "failed to send message" });
+    console.error("Send error full:", err);
+    res.status(500).json({ error: "failed to send message", details: err.message });
   }
 });
 
 // =======================
 // تشغيل السيرفر
 // =======================
-const PORT = process.env.PORT || 3000; // مهم لـ Render
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
