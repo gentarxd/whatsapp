@@ -60,32 +60,45 @@ async function startSock(sessionId) {
     // حفظ الكريدينشالز
     sock.ev.on("creds.update", saveCreds);
 
-   sock.ev.on("connection.update", (update) => {
+  sock.ev.on("connection.update", (update) => {
   try {
     const { connection, qr } = update;
 
+    // Initialize attempt counter
+    if (!qrGenerationAttempts[sessionId]) qrGenerationAttempts[sessionId] = 0;
+
     if (qr) {
+      // Count QR generation attempts
+      qrGenerationAttempts[sessionId]++;
+
+      if (qrGenerationAttempts[sessionId] > 5) {
+        console.warn(`⚠️ QR generation limit reached for ${sessionId}. No more QR will be generated.`);
+        sessionStatus[sessionId] = "qr_limit_reached";
+        return; // Stop generating new QR
+      }
+
       qrCodes[sessionId] = qr;
       sessionStatus[sessionId] = "qr";
-      console.log(`QR generated for ${sessionId}`);
+      console.log(`QR generated for ${sessionId} (Attempt ${qrGenerationAttempts[sessionId]}/5)`);
     }
 
     if (connection === "open") {
       sessionStatus[sessionId] = "open";
       console.log(`✅ Session ${sessionId} connected`);
       delete qrCodes[sessionId];
+      qrGenerationAttempts[sessionId] = 0; // Reset attempts after successful connect
     }
 
     if (connection === "close") {
       sessionStatus[sessionId] = "close";
       console.log(`❌ Session ${sessionId} closed (no reconnect will be attempted)`);
       clearInterval(pingInterval);
-      // لا إعادة اتصال أو QR جديد
     }
   } catch (e) {
     console.error(`Error in connection.update handler for ${sessionId}:`, e?.message || e);
   }
 });
+
 
     // LISTENER للرسائل الجديدة
     sock.ev.on("messages.upsert", async (m) => {
@@ -156,7 +169,7 @@ async function startSock(sessionId) {
         }
 
         await axios.post(
-          "https://n8n-production-394a.up.railway.app/webhook/909d7c73-112a-455b-988c-9f770852c8fa",
+        "https://n8n-production-394a.up.railway.app/webhook-test/909d7c73-112a-455b-988c-9f770852c8fa",
           form,
           { headers: form.getHeaders(), timeout: 20000 }
         );
