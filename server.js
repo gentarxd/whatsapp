@@ -89,12 +89,23 @@ async function startSock(sessionId) {
       qrGenerationAttempts[sessionId] = 0; // Reset attempts after successful connect
     }
 
-   if (connection === "close") {
+  if (connection === "close") {
   sessionStatus[sessionId] = "close";
-  console.log(`❌ Session ${sessionId} closed (no reconnect will be attempted)`);
+  console.log(`❌ Session ${sessionId} closed — reconnecting in 3s...`);
   clearInterval(pingInterval);
-  delete sessions[sessionId]; // 🔥 احذف الجلسة عشان تقدر تعيد فتحها بدون conflict
+  delete sessions[sessionId];
+
+  // لو الجلسة كانت لسه متربطة (pairing done) نعمل reconnect تلقائي بعد 3 ثواني
+  setTimeout(async () => {
+    try {
+      console.log(`🔁 Reconnecting session: ${sessionId}`);
+      await startSock(sessionId);
+    } catch (err) {
+      console.error(`Reconnect failed for ${sessionId}:`, err?.message || err);
+    }
+  }, 3000);
 }
+
 
   } catch (e) {
     console.error(`Error in connection.update handler for ${sessionId}:`, e?.message || e);
