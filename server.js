@@ -89,11 +89,13 @@ async function startSock(sessionId) {
       qrGenerationAttempts[sessionId] = 0; // Reset attempts after successful connect
     }
 
-    if (connection === "close") {
-      sessionStatus[sessionId] = "close";
-      console.log(`❌ Session ${sessionId} closed (no reconnect will be attempted)`);
-      clearInterval(pingInterval);
-    }
+   if (connection === "close") {
+  sessionStatus[sessionId] = "close";
+  console.log(`❌ Session ${sessionId} closed (no reconnect will be attempted)`);
+  clearInterval(pingInterval);
+  delete sessions[sessionId]; // 🔥 احذف الجلسة عشان تقدر تعيد فتحها بدون conflict
+}
+
   } catch (e) {
     console.error(`Error in connection.update handler for ${sessionId}:`, e?.message || e);
   }
