@@ -44,10 +44,15 @@ async function startSock(sessionId) {
 
     const { state, saveCreds } = await useMultiFileAuthState(authFolder);
 
-    const sock = makeWASocket({
-      printQRInTerminal: false,
-      auth: state,
-    });
+   const sock = makeWASocket({
+  printQRInTerminal: false,
+  auth: state,
+
+  // منع مزامنة التاريخ بالكامل
+  shouldSyncHistoryMessage: () => false,
+  syncFullHistory: false,
+});
+
 
     // Keep-Alive Ping
     const pingInterval = setInterval(() => {
@@ -246,10 +251,15 @@ app.post("/link-number", async (req, res) => {
 
     const { state, saveCreds } = await useMultiFileAuthState(authFolder);
 
-    const sock = makeWASocket({
-      printQRInTerminal: false,
-      auth: state,
-    });
+   const sock = makeWASocket({
+  printQRInTerminal: false,
+  auth: state,
+
+  // منع مزامنة التاريخ بالكامل
+  shouldSyncHistoryMessage: () => false,
+  syncFullHistory: false,
+});
+
 
     sock.ev.on("creds.update", saveCreds);
 
