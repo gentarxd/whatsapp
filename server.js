@@ -182,7 +182,7 @@ async function startSock(sessionId) {
         }
 
         await axios.post(
-        "https://n8n-production-394a.up.railway.app/webhook/909d7c73-112a-455b-988c-9f770852c8fa",
+        "https://n8n.gentar.cloud/webhook/909d7c73-112a-455b-988c-9f770852c8fa",
           form,
           { headers: form.getHeaders(), timeout: 20000 }
         );
