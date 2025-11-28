@@ -45,13 +45,16 @@ async function startSock(sessionId) {
     const { state, saveCreds } = await useMultiFileAuthState(authFolder);
 
    const sock = makeWASocket({
-  printQRInTerminal: false,
-  auth: state,
+      printQRInTerminal: false,
+      auth: state,
+      
+      // 👇 ضيف السطر ده هنا
+      browser: ["Ubuntu", "Chrome", "20.0.04"], 
 
-  // منع مزامنة التاريخ بالكامل
-  shouldSyncHistoryMessage: () => false,
-  syncFullHistory: false,
-});
+      // منع مزامنة التاريخ بالكامل
+      shouldSyncHistoryMessage: () => false,
+      syncFullHistory: false,
+    });
 
 
     // Keep-Alive Ping
@@ -209,7 +212,50 @@ async function startSock(sessionId) {
 // =======================
 // Routes
 // =======================
+// =======================
+// Create Group Route
+// =======================
+app.post("/create-group", async (req, res) => {
+  try {
+    const { sessionId, groupName, participants } = req.body;
 
+    // 1. التحقق من البيانات المطلوبة
+    if (!sessionId || !groupName || !Array.isArray(participants) || participants.length === 0) {
+      return res.status(400).json({ error: "sessionId, groupName, and participants (array) are required" });
+    }
+
+    // 2. التأكد من وجود الجلسة
+    const sock = sessions[sessionId];
+    if (!sock) {
+      return res.status(404).json({ error: "session not found" });
+    }
+
+    // 3. تحويل الأرقام لصيغة JID
+    // بنفترض إنك بتبعت الأرقام كـ strings عادية (مثال: "2010xxxx") زي ما بتعمل في /check
+    const pJids = participants.map(phone => `${phone}@s.whatsapp.net`);
+
+    // 4. إنشاء الجروب
+    console.log(`Creating group '${groupName}' for session ${sessionId} with ${pJids.length} members...`);
+    const group = await sock.groupCreate(groupName, pJids);
+    
+    // group object بيرجع فيه id و participants
+    console.log(`✅ Group created! ID: ${group.id}`);
+
+    // (اختياري) إرسال رسالة ترحيب أول ما الجروب يتعمل
+    await sock.sendMessage(group.id, { text: `Welcome to ${groupName}!` });
+
+    res.json({ 
+      status: "success", 
+      groupId: group.id, 
+      groupName: groupName,
+      participants: group.participants // بيرجعلك مين انضاف ومين لا (لو فيه privacy settings)
+    });
+
+  } catch (err) {
+    console.error("/create-group error:", err?.message || err);
+    res.status(500).json({ error: "failed to create group" });
+  }
+});
 app.post("/check", async (req, res) => {
   try {
     const { sessionId, numbers } = req.body;
@@ -339,18 +385,30 @@ app.post("/send-message", async (req, res) => {
   }
 });
 
+// =======================
+// Message Queue Processor (Modified for Groups)
+// =======================
 setInterval(async () => {
   if (messageQueue.length === 0) return;
 
   const { sessionId, phone, text, imageUrl } = messageQueue.shift();
   const sock = sessions[sessionId];
+  
   if (!sock) {
     console.error(`[queue] No session found: ${sessionId}`);
     messageStatus[phone] = "no_session";
     return;
   }
 
-  const jid = `${phone}@s.whatsapp.net`;
+  // التعديل هنا: تحديد نوع الـ JID بذكاء
+  let jid;
+  if (phone.includes('@')) {
+    // لو المبعوت فيه @ يبقى ده JID جاهز (سواء جروب أو شخص)
+    jid = phone; 
+  } else {
+    // لو أرقام بس، يبقى ده رقم شخصي ونضيفله الامتداد
+    jid = `${phone}@s.whatsapp.net`;
+  }
 
   try {
     if (imageUrl) {
@@ -361,39 +419,38 @@ setInterval(async () => {
             const response = await axios.get(imageUrl, { responseType: "arraybuffer", timeout: 60000 });
             let buffer = Buffer.from(response.data, "binary");
             await sock.sendMessage(jid, { image: buffer, caption: text || "", jpegThumbnail: null });
-            console.log(`[queue] Sent image (attempt ${attempt}) to ${phone}`);
+            console.log(`[queue] Sent image (attempt ${attempt}) to ${jid}`);
           } else {
             await sock.sendMessage(jid, { text: text || " " });
-            console.log(`[queue] Sent text fallback to ${phone}`);
+            console.log(`[queue] Sent text fallback to ${jid}`);
           }
           messageStatus[phone] = "sent";
           sent = true;
           break;
         } catch (err) {
-          console.error(`[queue] Error attempt ${attempt} for ${phone}:`, err?.message || err);
+          console.error(`[queue] Error attempt ${attempt} for ${jid}:`, err?.message || err);
           if ((err?.message || "").toLowerCase().includes("connection closed")) {
-            console.log(`[queue] Detected Connection Closed while sending to ${phone}. Will try reconnect.`);
+            console.log(`[queue] Detected Connection Closed. Will try reconnect.`);
             try { delete sessions[sessionId]; } catch(e){}
             const target = preferredSessionId || sessionId;
-            setTimeout(() => startSock(target).catch(e => console.error(`Reconnection error for ${target}:`, e?.message || e)), 3000);
+            setTimeout(() => startSock(target).catch(e => console.error(`Reconnection error:`, e)), 3000);
           }
         }
       }
       if (!sent) {
         messageStatus[phone] = "error";
-        console.error(`[queue] All attempts failed for ${phone}`);
+        console.error(`[queue] All attempts failed for ${jid}`);
       }
     } else {
       await sock.sendMessage(jid, { text });
-      console.log(`[queue] Sent text to ${phone}`);
+      console.log(`[queue] Sent text to ${jid}`);
       messageStatus[phone] = "sent";
     }
   } catch (err) {
-    console.error(`[queue] Fatal error sending to ${phone}:`, err?.message || err);
+    console.error(`[queue] Fatal error sending to ${jid}:`, err?.message || err);
     messageStatus[phone] = "error";
   }
 }, 2000);
-
 app.get("/message-status", (req, res) => {
   try { res.json(messageStatus); }
   catch (err) { console.error("/message-status error:", err?.message || err); res.status(500).json({ error: "failed to get message status" }); }
