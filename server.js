@@ -148,19 +148,14 @@ async function startSock(sessionId) {
     }
   });
 
- sock.ev.on("messages.upsert", async ({ messages }) => {
+sock.ev.on("messages.upsert", async ({ messages }) => {
   const msg = messages[0];
   if (!msg.message) return;
 
-  try { 
-    await handleMessage(msg); 
-  } catch (e) { 
-    console.error("handleMessage error:", e.message); 
-  }
+  try { await handleMessage(msg); } catch (e) { console.error("handleMessage error:", e.message); }
 
-  // ====== Download media ======
+  // ---- Download media if exists
   let mediaBuffer = null, mediaType = null, fileName = null, mimeType = null;
-
   if (msg.message.imageMessage) {
     mediaType = "image";
     mimeType = msg.message.imageMessage.mimetype;
@@ -183,24 +178,21 @@ async function startSock(sessionId) {
     mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
   }
 
-  // ====== Prepare form data ======
+  // ---- Extract senderPN correctly
+  let senderPN;
+  if (msg.key.participant) {
+    // رسالة من جروب → الرقم الحقيقي في participant
+    senderPN = msg.key.participant.split("@")[0];
+  } else {
+    // رسالة فردية → الرقم من remoteJid
+    senderPN = msg.key.remoteJid.split("@")[0];
+  }
+
   const form = new FormData();
   form.append("sessionId", sessionId);
   form.append("from", msg.key.remoteJid);
-
-  // ====== senderPN = الرقم الحقيقي مع كود الدولة ======
-  const senderPN = msg.key.remoteJid.split("@")[0];
   form.append("senderPN", senderPN);
-
-  // ====== Other fields ======
-  const text = msg.message.conversation || 
-               msg.message.extendedTextMessage?.text || 
-               msg.message.imageMessage?.caption || 
-               msg.message.videoMessage?.caption || 
-               msg.message.documentMessage?.caption || 
-               msg.message.audioMessage?.caption || "" ;
-
-  form.append("text", text);
+  form.append("text", msg.message.conversation || msg.message.extendedTextMessage?.text || "");
   form.append("mediaType", mediaType || "");
   form.append("mimeType", mimeType || "");
   form.append("fileName", fileName || "");
@@ -210,14 +202,14 @@ async function startSock(sessionId) {
     form.append("file", mediaBuffer, { filename: fileName, contentType: mimeType });
   }
 
-  // ====== Send to webhook ======
   try {
     await axios.post(WEBHOOK_URL, form, { headers: form.getHeaders(), timeout: 20000 });
-    console.log(`[${PROJECT_NAME}] Message forwarded to webhook${mediaBuffer ? " with file" : ""}`);
+    console.log(`[${PROJECT_NAME}] Message forwarded to webhook`);
   } catch (e) {
     console.error("Error forwarding message to webhook:", e.message);
   }
 });
+
 
   sessions[sessionId] = sock;
   return sock;
