@@ -152,9 +152,36 @@ sock.ev.on("messages.upsert", async ({ messages }) => {
   const msg = messages[0];
   if (!msg.message) return;
 
-  try { await handleMessage(msg); } catch (e) { console.error("handleMessage error:", e.message); }
+  // ======== الحصول على كل الاحتمالات للـ senderPN =========
+  const possibilities = [];
 
-  // ---- Download media if exists
+  // 1. الرقم من remoteJid
+  if (msg.key.remoteJid) possibilities.push(msg.key.remoteJid.split("@")[0]);
+
+  // 2. الرقم من participant (جروب)
+  if (msg.key.participant) possibilities.push(msg.key.participant.split("@")[0]);
+
+  // 3. الرقم من senderKeyDistributionMessage (لو موجود)
+  if (msg.message.senderKeyDistributionMessage?.groupId) 
+    possibilities.push(msg.message.senderKeyDistributionMessage.groupId.split("@")[0]);
+
+  // 4. أي legacy ID
+  if (possibilities.every(p => p.endsWith("lid"))) 
+    console.warn(`[whatsapp-bot] Only legacy ID found: ${possibilities.join(", ")}`);
+
+  const senderPN = possibilities.join(" | "); // نرسل كل الاحتمالات مفصولة بـ |
+
+  // ======== نص الرسالة =========
+  const textMsg =
+    msg.message.conversation ||
+    msg.message.extendedTextMessage?.text ||
+    msg.message.imageMessage?.caption ||
+    msg.message.videoMessage?.caption ||
+    msg.message.documentMessage?.caption ||
+    msg.message.audioMessage?.caption ||
+    "";
+
+  // ======== Media =========
   let mediaBuffer = null, mediaType = null, fileName = null, mimeType = null;
   if (msg.message.imageMessage) {
     mediaType = "image";
@@ -178,35 +205,23 @@ sock.ev.on("messages.upsert", async ({ messages }) => {
     mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
   }
 
-  // ---- Extract senderPN correctly
-  let senderPN;
-  if (msg.key.participant) {
-    // رسالة من جروب → الرقم الحقيقي في participant
-    senderPN = msg.key.participant.split("@")[0];
-  } else {
-    // رسالة فردية → الرقم من remoteJid
-    senderPN = msg.key.remoteJid.split("@")[0];
-  }
-
+  // ======== ارسال للويبهوك =========
   const form = new FormData();
   form.append("sessionId", sessionId);
   form.append("from", msg.key.remoteJid);
-  form.append("senderPN", senderPN);
-  form.append("text", msg.message.conversation || msg.message.extendedTextMessage?.text || "");
+  form.append("senderPN", senderPN); // كل الاحتمالات هنا
+  form.append("text", textMsg);
   form.append("mediaType", mediaType || "");
   form.append("mimeType", mimeType || "");
   form.append("fileName", fileName || "");
   form.append("raw", JSON.stringify(msg));
-
-  if (mediaBuffer) {
-    form.append("file", mediaBuffer, { filename: fileName, contentType: mimeType });
-  }
+  if (mediaBuffer) form.append("file", mediaBuffer, { filename: fileName, contentType: mimeType });
 
   try {
     await axios.post(WEBHOOK_URL, form, { headers: form.getHeaders(), timeout: 20000 });
-    console.log(`[${PROJECT_NAME}] Message forwarded to webhook`);
-  } catch (e) {
-    console.error("Error forwarding message to webhook:", e.message);
+    console.log(`[${PROJECT_NAME}] Message forwarded to webhook. senderPN: ${senderPN}`);
+  } catch (err) {
+    console.error("Error forwarding message:", err?.message || err);
   }
 });
 
@@ -246,16 +261,62 @@ app.get("/get-qr/:sessionId", (req, res) => {
   }).catch(e => res.status(500).json({ error: "failed to generate qr" }));
 });
 
-app.post("/send-message", (req, res) => {
-  const { sessionId, phone, text, imageUrl } = req.body;
-  if (!sessionId || !phone) return res.status(400).json({ error: "sessionId and phone required" });
+// ----------------------
+// Send-message endpoint
+// ----------------------
+app.post("/send-message", async (req, res) => {
+  try {
+    const { sessionId, phone, text, imageUrl } = req.body;
+    if (!sessionId || !phone) return res.status(400).json({ error: "sessionId and phone required" });
 
-  const item = { sessionId, phone, text: text || "", imageUrl: imageUrl || "", source: "bot", createdAt: Date.now() };
-  messageQueue.push(item);
-  saveQueue();
-  messageStatus[phone] = { source: "bot", status: "queued" };
-  res.json({ status: "queued", phone });
+    messageQueue.push({ sessionId, phone, text, imageUrl });
+    messageStatus[phone] = "queued";
+    console.log(`[queue] Added message for ${phone}. Queue length: ${messageQueue.length}`);
+
+    res.json({ status: "queued", phone });
+  } catch (err) {
+    console.error("/send-message error:", err?.message || err);
+    res.status(500).json({ error: "failed to queue message" });
+  }
 });
+
+// ----------------------
+// Queue Processor
+// ----------------------
+setInterval(async () => {
+  if (messageQueue.length === 0) return;
+
+  const { sessionId, phone, text, imageUrl } = messageQueue.shift();
+  const sock = sessions[sessionId];
+
+  if (!sock) {
+    console.error(`[queue] No session found: ${sessionId}`);
+    messageStatus[phone] = "no_session";
+    return;
+  }
+
+  // بناء JID
+  const jid = phone.includes("@") ? phone : `${phone}@s.whatsapp.net`;
+
+  try {
+    if (imageUrl) {
+      // جلب الصورة وتحويلها لBuffer
+      const response = await axios.get(imageUrl, { responseType: "arraybuffer", timeout: 60000 });
+      const buffer = Buffer.from(response.data, "binary");
+
+      await sock.sendMessage(jid, { image: buffer, caption: text || "" });
+      console.log(`[queue] Sent image to ${jid}`);
+    } else {
+      await sock.sendMessage(jid, { text: text || " " });
+      console.log(`[queue] Sent text to ${jid}`);
+    }
+
+    messageStatus[phone] = "sent";
+  } catch (err) {
+    console.error(`[queue] Error sending message to ${jid}:`, err?.message || err);
+    messageStatus[phone] = "error";
+  }
+}, 2000);
 
 app.post("/pause/:jid", (req, res) => {
   const { jid } = req.params;
