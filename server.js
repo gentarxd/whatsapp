@@ -1,4 +1,3 @@
-
 import express from "express";
 import makeWASocket, { useMultiFileAuthState, downloadMediaMessage } from "@whiskeysockets/baileys";
 import axios from "axios";
@@ -12,11 +11,11 @@ import process from "process";
 const PROJECT_NAME = process.env.PROJECT_NAME || "whatsapp-bot";
 const PORT = process.env.PORT || 3000;
 const AUTH_DIR = process.env.AUTH_DIR || "./data/auth_info";
+const DATA_DIR = "./data";
 const WEBHOOK_URL = process.env.WEBHOOK_URL || "https://n8n.gentar.cloud/webhook/909d7c73-112a-455b-988c-9f770852c8fa";
 const PAUSE_MINUTES = parseInt(process.env.PAUSE_MINUTES || "60", 10);
 
-// ---- Data folders
-const DATA_DIR = "./data";
+// ---- Ensure folders
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
 if (!fs.existsSync("./downloads")) fs.mkdirSync("./downloads", { recursive: true });
@@ -36,8 +35,9 @@ function writeJSON(file, data) {
 // ---- State
 const OVERRIDES_FILE = path.join(DATA_DIR, "overrides.json");
 const QUEUE_FILE = path.join(DATA_DIR, "queue.json");
+const PAUSE_FILE = path.join(DATA_DIR, "pause.json");
 
-const humanOverride = readJSON(OVERRIDES_FILE, {}); // { jid: pauseUntilMs }
+const pauseUntil = readJSON(PAUSE_FILE, {}); // { jid: timestamp }
 const messageQueue = readJSON(QUEUE_FILE, []); // array of { sessionId, phone, text, imageUrl, source, createdAt }
 
 const sessions = {};
@@ -47,11 +47,53 @@ const qrGenerationAttempts = {};
 const messageStatus = {}; // { phone: { source, status } }
 
 // ---- Util
-function saveOverrides() { writeJSON(OVERRIDES_FILE, humanOverride); }
 function saveQueue() { writeJSON(QUEUE_FILE, messageQueue); }
-function canAutoReply(jid) {
-  const pauseUntil = humanOverride[jid];
-  return !pauseUntil || Date.now() > pauseUntil;
+function savePauseFile() { writeJSON(PAUSE_FILE, pauseUntil); }
+function canAutoReply(jid) { return !pauseUntil[jid] || Date.now() > pauseUntil[jid]; }
+
+// ---- Handle incoming message
+async function handleMessage(from, message) {
+  const now = Date.now();
+  const textMsg =
+    message?.message?.conversation ||
+    message?.message?.extendedTextMessage?.text ||
+    message?.message?.imageMessage?.caption ||
+    "";
+
+  // ===== Detect if it's a reply (human intervention)
+  const isReply = !!message?.message?.extendedTextMessage?.contextInfo?.stanzaId;
+
+  // ===== Human reply → pause bot for 1 hour
+  if (isReply) {
+    pauseUntil[from] = now + PAUSE_MINUTES * 60 * 1000;
+    savePauseFile();
+    console.log(`[whatsapp-bot] Paused auto-reply for ${from} due to human reply`);
+    return; // لا نرد على العميل الآن
+  }
+
+  // ===== Check if bot is currently paused
+  if (pauseUntil[from] && pauseUntil[from] > now) {
+    console.log(
+      `[whatsapp-bot] Auto-reply still paused for ${from} until ${new Date(
+        pauseUntil[from]
+      ).toISOString()}`
+    );
+    return; // لا نرد
+  } else if (pauseUntil[from] && pauseUntil[from] <= now) {
+    // pause انتهت → حذف pause
+    delete pauseUntil[from];
+    savePauseFile();
+    console.log(`[whatsapp-bot] Auto-reply resumed for ${from}`);
+  }
+
+  // ===== Forward to n8n webhook
+  const payload = { from, text: textMsg, timestamp: now };
+  try {
+    await axios.post(WEBHOOK_URL, payload);
+    console.log(`[whatsapp-bot] Forwarded message from ${from} to n8n`);
+  } catch (err) {
+    console.error(`[whatsapp-bot] Failed to forward to n8n:`, err.message);
+  }
 }
 
 // ---- WhatsApp socket
@@ -79,28 +121,26 @@ async function startSock(sessionId) {
   sock.ev.on("creds.update", saveCreds);
 
   sock.ev.on("connection.update", (update) => {
-    try {
-      const { connection, qr } = update;
-      if (qr) {
-        qrGenerationAttempts[sessionId] = (qrGenerationAttempts[sessionId] || 0) + 1;
-        qrCodes[sessionId] = qr;
-        sessionStatus[sessionId] = "qr";
-        console.log(`[${PROJECT_NAME}] QR generated for ${sessionId} (attempt ${qrGenerationAttempts[sessionId]})`);
-      }
-      if (connection === "open") {
-        sessionStatus[sessionId] = "open";
-        delete qrCodes[sessionId];
-        qrGenerationAttempts[sessionId] = 0;
-        console.log(`[${PROJECT_NAME}] Session ${sessionId} open`);
-      }
-      if (connection === "close") {
-        sessionStatus[sessionId] = "close";
-        clearInterval(pingInterval);
-        delete sessions[sessionId];
-        console.log(`[${PROJECT_NAME}] Session ${sessionId} closed — reconnecting in 3s...`);
-        setTimeout(() => startSock(sessionId).catch(e => console.error(e)), 3000);
-      }
-    } catch (e) { console.error("connection.update error", e?.message || e); }
+    const { connection, qr } = update;
+    if (qr) {
+      qrGenerationAttempts[sessionId] = (qrGenerationAttempts[sessionId] || 0) + 1;
+      qrCodes[sessionId] = qr;
+      sessionStatus[sessionId] = "qr";
+      console.log(`[${PROJECT_NAME}] QR generated for ${sessionId}`);
+    }
+    if (connection === "open") {
+      sessionStatus[sessionId] = "open";
+      delete qrCodes[sessionId];
+      qrGenerationAttempts[sessionId] = 0;
+      console.log(`[${PROJECT_NAME}] Session ${sessionId} open`);
+    }
+    if (connection === "close") {
+      sessionStatus[sessionId] = "close";
+      clearInterval(pingInterval);
+      delete sessions[sessionId];
+      console.log(`[${PROJECT_NAME}] Session ${sessionId} closed — reconnecting in 3s...`);
+      setTimeout(() => startSock(sessionId).catch(console.error), 3000);
+    }
   });
 
   // ---- Messages
@@ -109,35 +149,14 @@ async function startSock(sessionId) {
     if (!msg.message) return;
 
     const from = msg.key.remoteJid;
-    const isFromMe = msg.key.fromMe === true;
 
-    // ---- تجاهل رسائل البوت اللي مصدرها queue
-    if (isFromMe && messageStatus[from]?.source === "bot") return;
-
-    // ---- رد بشري → Pause البوت
-    if (!isFromMe) {
-      humanOverride[from] = Date.now() + PAUSE_MINUTES * 60 * 1000;
-      saveOverrides();
-      console.log(`[BOT PAUSED] Human overridden for ${from}`);
-      return;
+    try {
+      await handleMessage(from, msg);
+    } catch (e) {
+      console.error("handleMessage error:", e.message);
     }
 
-    // ---- Ignore إذا فيه Pause
-    if (!canAutoReply(from)) {
-      console.log(`[AUTO-PAUSE] Ignored for ${from}`);
-      return;
-    }
-
-    // ---- استخراج النص / الميديا
-    let text =
-      msg.message.conversation ||
-      msg.message.extendedTextMessage?.text ||
-      msg.message.imageMessage?.caption ||
-      msg.message.videoMessage?.caption ||
-      msg.message.documentMessage?.caption ||
-      msg.message.audioMessage?.caption ||
-      "";
-
+    // ---- Download media and forward to webhook
     let mediaBuffer = null, mediaType = null, fileName = null, mimeType = null;
     if (msg.message.imageMessage) {
       mediaType = "image";
@@ -161,22 +180,25 @@ async function startSock(sessionId) {
       mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
     }
 
-    // ---- Forward to webhook
-    try {
+    // Forward media to webhook
+    if (mediaBuffer) {
       const form = new FormData();
       form.append("sessionId", sessionId);
       form.append("from", from);
-      form.append("text", text || "");
-      form.append("mediaType", mediaType || "");
-      form.append("mimeType", mimeType || "");
-      form.append("fileName", fileName || "");
+      form.append("text", msg.message.conversation || "");
+      form.append("mediaType", mediaType);
+      form.append("mimeType", mimeType);
+      form.append("fileName", fileName);
       form.append("raw", JSON.stringify(msg));
+      form.append("file", mediaBuffer, { filename: fileName, contentType: mimeType });
 
-      if (mediaBuffer) form.append("file", mediaBuffer, { filename: fileName, contentType: mimeType });
-
-      await axios.post(WEBHOOK_URL, form, { headers: form.getHeaders(), timeout: 20000 });
-      console.log(`[${PROJECT_NAME}] Message forwarded to webhook`);
-    } catch (e) { console.error(`[${PROJECT_NAME}] Error forwarding to webhook:`, e?.message || e); }
+      try {
+        await axios.post(WEBHOOK_URL, form, { headers: form.getHeaders(), timeout: 20000 });
+        console.log(`[${PROJECT_NAME}] Media forwarded to webhook`);
+      } catch (e) {
+        console.error("Error forwarding media:", e.message);
+      }
+    }
   });
 
   sessions[sessionId] = sock;
@@ -188,11 +210,11 @@ const app = express();
 app.use(express.json());
 
 app.get("/", (req, res) => res.send(`${PROJECT_NAME} running`));
-// ---- Create WhatsApp session
+
 app.post("/create-session", async (req, res) => {
+  const { sessionId } = req.body;
+  if (!sessionId) return res.status(400).json({ error: "sessionId required" });
   try {
-    const { sessionId } = req.body;
-    if (!sessionId) return res.status(400).json({ error: "sessionId required" });
     await startSock(sessionId);
     res.json({ message: "session created", sessionId });
   } catch (e) {
@@ -201,7 +223,6 @@ app.post("/create-session", async (req, res) => {
   }
 });
 
-// ---- Get QR code for session
 app.get("/get-qr/:sessionId", (req, res) => {
   const { sessionId } = req.params;
   const qr = qrCodes[sessionId];
@@ -214,6 +235,7 @@ app.get("/get-qr/:sessionId", (req, res) => {
     res.end(img);
   }).catch(e => res.status(500).json({ error: "failed to generate qr" }));
 });
+
 app.post("/send-message", (req, res) => {
   const { sessionId, phone, text, imageUrl } = req.body;
   if (!sessionId || !phone) return res.status(400).json({ error: "sessionId and phone required" });
@@ -225,21 +247,17 @@ app.post("/send-message", (req, res) => {
   res.json({ status: "queued", phone });
 });
 
-// ---- Pause manually
 app.post("/pause/:jid", (req, res) => {
   const { jid } = req.params;
-  humanOverride[jid] = Date.now() + PAUSE_MINUTES * 60 * 1000;
-  saveOverrides();
-  res.json({ status: "paused", until: new Date(humanOverride[jid]).toISOString() });
+  pauseUntil[jid] = Date.now() + PAUSE_MINUTES * 60 * 1000;
+  savePauseFile();
+  res.json({ status: "paused", until: new Date(pauseUntil[jid]).toISOString() });
 });
 
-// ---- Startup
-function reconnectSessions() {
-  if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
-  const sessionFolders = fs.readdirSync(AUTH_DIR).filter(x => fs.statSync(path.join(AUTH_DIR, x)).isDirectory());
-  console.log(`[${PROJECT_NAME}] Found ${sessionFolders.length} session(s) to reconnect.`);
-  sessionFolders.forEach(sessionId => startSock(sessionId).catch(e => console.error("reconnect error", e?.message || e)));
-}
-reconnectSessions();
+// ---- Reconnect all sessions on startup
+if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
+const sessionFolders = fs.readdirSync(AUTH_DIR).filter(x => fs.statSync(path.join(AUTH_DIR, x)).isDirectory());
+console.log(`[${PROJECT_NAME}] Found ${sessionFolders.length} session(s) to reconnect.`);
+sessionFolders.forEach(sessionId => startSock(sessionId).catch(console.error));
 
 app.listen(PORT, () => console.log(`[${PROJECT_NAME}] Server running on port ${PORT}`));
