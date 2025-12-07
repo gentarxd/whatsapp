@@ -106,7 +106,7 @@ async function startSock(sessionId) {
   // ---- Listen for incoming messages
   sock.ev.on("messages.upsert", async (m) => {
     const msg = m.messages[0];
-    if (!msg.message) return;
+    if (!msg.message || msg.key.fromMe) return;
 
     const from = msg.key.remoteJid;
     const senderPN = getSenderPN(msg);
