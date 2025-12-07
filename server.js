@@ -221,7 +221,7 @@ sock.ev.on("messages.upsert", async ({ messages }) => {
 
 sessions[sessionId] = sock;
 return sock;
-    {
+  }
   // ---- simple reconnect existing sessions on boot
   function reconnectSessions() {
     try {
