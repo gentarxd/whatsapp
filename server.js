@@ -22,13 +22,12 @@ if (!fs.existsSync("./downloads")) fs.mkdirSync("./downloads", { recursive: true
 
 // ---- Persistence helpers
 function readJSON(file, fallback) {
-  try {
-    if (fs.existsSync(file)) return JSON.parse(fs.readFileSync(file, "utf8") || "null") || fallback;
-  } catch (e) { console.error("readJSON error", file, e?.message || e); }
+  try { if (fs.existsSync(file)) return JSON.parse(fs.readFileSync(file, "utf8") || "null") || fallback; } 
+  catch (e) { console.error("readJSON error", file, e?.message || e); }
   return fallback;
 }
 function writeJSON(file, data) {
-  try { fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf8"); }
+  try { fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf8"); } 
   catch (e) { console.error("writeJSON error", file, e?.message || e); }
 }
 
@@ -43,66 +42,18 @@ const sessions = {};
 const qrCodes = {};
 const sessionStatus = {};
 const qrGenerationAttempts = {};
-const messageStatus = {}; // { phone: { status, source } }
+const messageStatus = {}; // { phone: { status } }
 
 // ---- Utils
 function saveQueue() { writeJSON(QUEUE_FILE, messageQueue); }
 function savePauseFile() { writeJSON(PAUSE_FILE, pauseUntil); }
-function canAutoReply(jid) { return !pauseUntil[jid] || Date.now() > pauseUntil[jid]; }
 
 // ---- Extract senderPN
 function getSenderPN(msg) {
   if (msg.key.participant) return msg.key.participant.split("@")[0]; // جروب
   if (msg.key.senderPn) return msg.key.senderPn.split("@")[0]; // موجود في الرسالة
   if (msg.key.remoteJid && msg.key.remoteJid.includes("@s.whatsapp.net")) return msg.key.remoteJid.split("@")[0]; // فردي
-  return msg.key.remoteJid ? msg.key.remoteJid.split("@")[0] : null; // fallback
-}
-
-// ---- Handle incoming message
-async function handleMessage(msg) {
-  const now = Date.now();
-  const from = msg.key.remoteJid;
-  const senderPN = getSenderPN(msg);
-
-  const textMsg =
-    msg?.message?.conversation ||
-    msg?.message?.extendedTextMessage?.text ||
-    msg?.message?.imageMessage?.caption ||
-    msg?.message?.videoMessage?.caption ||
-    msg?.message?.documentMessage?.caption ||
-    msg?.message?.audioMessage?.caption ||
-    "";
-
-  // ---- كشف الرد البشري
-  const isReply =
-    !!msg?.message?.extendedTextMessage?.contextInfo?.stanzaId ||
-    !!msg?.message?.extendedTextMessage?.contextInfo?.quotedMessage;
-
-  if (isReply) {
-    pauseUntil[from] = now + PAUSE_MINUTES * 60 * 1000;
-    savePauseFile();
-    console.log(`[whatsapp-bot] Paused auto-reply for ${from} due to human reply`);
-    return;
-  }
-
-  // ---- تحقق من الباوز لو موجود
-  if (pauseUntil[from] && pauseUntil[from] > now) {
-    console.log(`[whatsapp-bot] Auto-reply still paused for ${from} until ${new Date(pauseUntil[from]).toISOString()}`);
-    return;
-  } else if (pauseUntil[from] && pauseUntil[from] <= now) {
-    delete pauseUntil[from];
-    savePauseFile();
-    console.log(`[whatsapp-bot] Auto-reply resumed for ${from}`);
-  }
-
-  // ---- ارسال الرسالة لـ webhook
-  const payload = { from, senderPN, text: textMsg, timestamp: now };
-  try {
-    await axios.post(WEBHOOK_URL, payload);
-    console.log(`[whatsapp-bot] Forwarded message from ${senderPN} to n8n`);
-  } catch (err) {
-    console.error(`[whatsapp-bot] Failed to forward to n8n:`, err.message);
-  }
+  return msg.key.remoteJid ? msg.key.remoteJid.split("@")[0] : null;
 }
 
 // ---- WhatsApp socket
@@ -155,11 +106,34 @@ async function startSock(sessionId) {
   // ---- Listen for incoming messages
   sock.ev.on("messages.upsert", async (m) => {
     const msg = m.messages[0];
-    if (!msg.message || msg.key.fromMe) return;
+    if (!msg.message) return;
 
-    await handleMessage(msg);
+    const from = msg.key.remoteJid;
+    const senderPN = getSenderPN(msg);
+    const type = Object.keys(msg.message)[0];
 
-    // ---- Download media
+    let text =
+      msg.message.conversation ||
+      msg.message.extendedTextMessage?.text ||
+      msg.message.imageMessage?.caption ||
+      msg.message.videoMessage?.caption ||
+      msg.message.documentMessage?.caption ||
+      msg.message.audioMessage?.caption ||
+      "";
+
+    const fromMe = !!msg.key.fromMe;
+    const isReply =
+      !!msg.message.extendedTextMessage?.contextInfo?.stanzaId ||
+      !!msg.message.extendedTextMessage?.contextInfo?.quotedMessage;
+
+    // ---- لو الرد من البوت نفسه (fromMe) نوقف إرسال رسائل للعميل لمدة ساعة
+    if (isReply && fromMe) {
+      pauseUntil[from] = Date.now() + PAUSE_MINUTES * 60 * 1000;
+      savePauseFile();
+      console.log(`[whatsapp-bot] Paused sending messages to ${from} for ${PAUSE_MINUTES} minutes due to bot reply`);
+    }
+
+    // ---- Download media لو موجود
     let mediaBuffer = null, fileName = null, mimeType = null;
     if (msg.message.imageMessage) {
       mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
@@ -179,19 +153,21 @@ async function startSock(sessionId) {
       mimeType = msg.message.audioMessage.mimetype;
     }
 
-    // ---- Forward full message to webhook
+    // ---- إرسال للـ webhook
     const form = new FormData();
     form.append("sessionId", sessionId);
-    form.append("from", msg.key.remoteJid);
-    form.append("senderPN", getSenderPN(msg));
-    form.append("type", Object.keys(msg.message)[0]);
-    form.append("text", msg.message.conversation || "");
+    form.append("from", from);
+    form.append("senderPN", senderPN);
+    form.append("fromMe", fromMe);
+    form.append("isReply", isReply);
+    form.append("type", type);
+    form.append("text", text || "");
     form.append("raw", JSON.stringify(msg));
     if (mediaBuffer) form.append("file", mediaBuffer, { filename: fileName, contentType: mimeType });
 
     try {
       await axios.post(WEBHOOK_URL, form, { headers: form.getHeaders(), timeout: 20000 });
-      console.log(`[${PROJECT_NAME}] Message forwarded from ${getSenderPN(msg)}`);
+      console.log(`[${PROJECT_NAME}] Message forwarded from ${senderPN}, fromMe: ${fromMe}, isReply: ${isReply}`);
     } catch (err) {
       console.error(`[${PROJECT_NAME}] Failed to forward message:`, err.message);
     }
@@ -226,9 +202,7 @@ app.get("/get-qr/:sessionId", (req, res) => {
   }).catch(e => res.status(500).json({ error: "failed to generate qr" }));
 });
 
-// ----------------------
-// Send-message endpoint
-// ----------------------
+// ---- Send-message endpoint
 app.post("/send-message", async (req, res) => {
   try {
     const { sessionId, phone, text, imageUrl } = req.body;
@@ -245,13 +219,19 @@ app.post("/send-message", async (req, res) => {
   }
 });
 
-// ----------------------
-// Queue Processor
-// ----------------------
+// ---- Queue Processor
 setInterval(async () => {
   if (!messageQueue.length) return;
 
-  const { sessionId, phone, text, imageUrl } = messageQueue.shift();
+  const { sessionId, phone, text, imageUrl } = messageQueue[0]; // تحقق قبل shift
+  const now = Date.now();
+
+  if (pauseUntil[phone] && pauseUntil[phone] > now) {
+    console.log(`[queue] Skipping ${phone}, paused until ${new Date(pauseUntil[phone]).toISOString()}`);
+    return;
+  }
+
+  messageQueue.shift(); // نشيلها بعد التأكد
   const sock = sessions[sessionId];
   if (!sock) { messageStatus[phone] = { status: "no_session" }; return; }
 
@@ -273,14 +253,6 @@ setInterval(async () => {
     messageStatus[phone] = { status: "error" };
   }
 }, 2000);
-
-// ---- Pause endpoint
-app.post("/pause/:jid", (req, res) => {
-  const { jid } = req.params;
-  pauseUntil[jid] = Date.now() + PAUSE_MINUTES * 60 * 1000;
-  savePauseFile();
-  res.json({ status: "paused", until: new Date(pauseUntil[jid]).toISOString() });
-});
 
 // ---- Reconnect all sessions on startup
 const sessionFolders = fs.existsSync(AUTH_DIR) ? fs.readdirSync(AUTH_DIR).filter(x => fs.statSync(path.join(AUTH_DIR, x)).isDirectory()) : [];
