@@ -45,20 +45,23 @@ const sessionStatus = {};
 const qrGenerationAttempts = {};
 const messageStatus = {}; // { phone: { source, status } }
 
-// ---- Util
+// ---- Utils
 function saveQueue() { writeJSON(QUEUE_FILE, messageQueue); }
 function savePauseFile() { writeJSON(PAUSE_FILE, pauseUntil); }
 function canAutoReply(jid) { return !pauseUntil[jid] || Date.now() > pauseUntil[jid]; }
-function extractSenderPn(msg) {
-  const raw = msg.key.participant || msg.key.remoteJid || "";
-  return raw.split("@")[0];
+
+// ---- Extract senderPN
+function getSenderPN(msg) {
+  return msg.key.participant
+    ? msg.key.participant.split("@")[0]
+    : msg.key.remoteJid.split("@")[0];
 }
 
 // ---- Handle incoming message
 async function handleMessage(msg) {
-  const from = msg.key.remoteJid;
   const now = Date.now();
-  const senderPn = extractSenderPn(msg);
+  const from = msg.key.remoteJid;
+  const senderPN = getSenderPN(msg);
 
   const textMsg =
     msg?.message?.conversation ||
@@ -66,30 +69,33 @@ async function handleMessage(msg) {
     msg?.message?.imageMessage?.caption ||
     "";
 
-  // Detect if human replied (reply)
+  // Detect reply (human intervention)
   const isReply = !!msg?.message?.extendedTextMessage?.contextInfo?.stanzaId;
 
+  // Human reply → pause bot for 1 hour
   if (isReply) {
     pauseUntil[from] = now + PAUSE_MINUTES * 60 * 1000;
     savePauseFile();
-    console.log(`[whatsapp-bot] Paused auto-reply for ${senderPn} due to human reply`);
+    console.log(`[whatsapp-bot] Paused auto-reply for ${from} due to human reply`);
     return;
   }
 
-  // Skip if bot is paused
+  // Check if bot is currently paused
   if (pauseUntil[from] && pauseUntil[from] > now) {
-    console.log(`[whatsapp-bot] Auto-reply paused for ${senderPn} until ${new Date(pauseUntil[from]).toISOString()}`);
+    console.log(`[whatsapp-bot] Auto-reply still paused for ${from} until ${new Date(pauseUntil[from]).toISOString()}`);
     return;
   } else if (pauseUntil[from] && pauseUntil[from] <= now) {
+    // pause ended → remove pause
     delete pauseUntil[from];
     savePauseFile();
-    console.log(`[whatsapp-bot] Auto-reply resumed for ${senderPn}`);
+    console.log(`[whatsapp-bot] Auto-reply resumed for ${from}`);
   }
 
-  // Forward text to n8n
+  // Forward to n8n webhook
+  const payload = { from, senderPN, text: textMsg, timestamp: now };
   try {
-    await axios.post(WEBHOOK_URL, { from, senderPn, text: textMsg, timestamp: now });
-    console.log(`[whatsapp-bot] Forwarded message from ${senderPn} to n8n`);
+    await axios.post(WEBHOOK_URL, payload);
+    console.log(`[whatsapp-bot] Forwarded message from ${senderPN} to n8n`);
   } catch (err) {
     console.error(`[whatsapp-bot] Failed to forward to n8n:`, err.message);
   }
@@ -146,9 +152,9 @@ async function startSock(sessionId) {
     const msg = messages[0];
     if (!msg.message) return;
 
-    await handleMessage(msg);
+    try { await handleMessage(msg); } catch (e) { console.error("handleMessage error:", e.message); }
 
-    // ---- Download media and forward to webhook
+    // ---- Download media and forward
     let mediaBuffer = null, mediaType = null, fileName = null, mimeType = null;
     if (msg.message.imageMessage) {
       mediaType = "image";
@@ -176,7 +182,7 @@ async function startSock(sessionId) {
       const form = new FormData();
       form.append("sessionId", sessionId);
       form.append("from", msg.key.remoteJid);
-      form.append("senderPn", extractSenderPn(msg));
+      form.append("senderPN", getSenderPN(msg));
       form.append("text", msg.message.conversation || "");
       form.append("mediaType", mediaType);
       form.append("mimeType", mimeType);
