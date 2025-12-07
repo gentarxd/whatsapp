@@ -33,9 +33,8 @@ function writeJSON(file, data) {
 }
 
 // ---- State
-const OVERRIDES_FILE = path.join(DATA_DIR, "overrides.json");
-const QUEUE_FILE = path.join(DATA_DIR, "queue.json");
 const PAUSE_FILE = path.join(DATA_DIR, "pause.json");
+const QUEUE_FILE = path.join(DATA_DIR, "queue.json");
 
 const pauseUntil = readJSON(PAUSE_FILE, {}); // { jid: timestamp }
 const messageQueue = readJSON(QUEUE_FILE, []); // array of { sessionId, phone, text, imageUrl, source, createdAt }
@@ -50,47 +49,47 @@ const messageStatus = {}; // { phone: { source, status } }
 function saveQueue() { writeJSON(QUEUE_FILE, messageQueue); }
 function savePauseFile() { writeJSON(PAUSE_FILE, pauseUntil); }
 function canAutoReply(jid) { return !pauseUntil[jid] || Date.now() > pauseUntil[jid]; }
+function extractSenderPn(msg) {
+  const raw = msg.key.participant || msg.key.remoteJid || "";
+  return raw.split("@")[0];
+}
 
 // ---- Handle incoming message
-async function handleMessage(from, message) {
+async function handleMessage(msg) {
+  const from = msg.key.remoteJid;
   const now = Date.now();
+  const senderPn = extractSenderPn(msg);
+
   const textMsg =
-    message?.message?.conversation ||
-    message?.message?.extendedTextMessage?.text ||
-    message?.message?.imageMessage?.caption ||
+    msg?.message?.conversation ||
+    msg?.message?.extendedTextMessage?.text ||
+    msg?.message?.imageMessage?.caption ||
     "";
 
-  // ===== Detect if it's a reply (human intervention)
-  const isReply = !!message?.message?.extendedTextMessage?.contextInfo?.stanzaId;
+  // Detect if human replied (reply)
+  const isReply = !!msg?.message?.extendedTextMessage?.contextInfo?.stanzaId;
 
-  // ===== Human reply → pause bot for 1 hour
   if (isReply) {
     pauseUntil[from] = now + PAUSE_MINUTES * 60 * 1000;
     savePauseFile();
-    console.log(`[whatsapp-bot] Paused auto-reply for ${from} due to human reply`);
-    return; // لا نرد على العميل الآن
+    console.log(`[whatsapp-bot] Paused auto-reply for ${senderPn} due to human reply`);
+    return;
   }
 
-  // ===== Check if bot is currently paused
+  // Skip if bot is paused
   if (pauseUntil[from] && pauseUntil[from] > now) {
-    console.log(
-      `[whatsapp-bot] Auto-reply still paused for ${from} until ${new Date(
-        pauseUntil[from]
-      ).toISOString()}`
-    );
-    return; // لا نرد
+    console.log(`[whatsapp-bot] Auto-reply paused for ${senderPn} until ${new Date(pauseUntil[from]).toISOString()}`);
+    return;
   } else if (pauseUntil[from] && pauseUntil[from] <= now) {
-    // pause انتهت → حذف pause
     delete pauseUntil[from];
     savePauseFile();
-    console.log(`[whatsapp-bot] Auto-reply resumed for ${from}`);
+    console.log(`[whatsapp-bot] Auto-reply resumed for ${senderPn}`);
   }
 
-  // ===== Forward to n8n webhook
-  const payload = { from, text: textMsg, timestamp: now };
+  // Forward text to n8n
   try {
-    await axios.post(WEBHOOK_URL, payload);
-    console.log(`[whatsapp-bot] Forwarded message from ${from} to n8n`);
+    await axios.post(WEBHOOK_URL, { from, senderPn, text: textMsg, timestamp: now });
+    console.log(`[whatsapp-bot] Forwarded message from ${senderPn} to n8n`);
   } catch (err) {
     console.error(`[whatsapp-bot] Failed to forward to n8n:`, err.message);
   }
@@ -143,18 +142,11 @@ async function startSock(sessionId) {
     }
   });
 
-  // ---- Messages
   sock.ev.on("messages.upsert", async ({ messages }) => {
     const msg = messages[0];
     if (!msg.message) return;
 
-    const from = msg.key.remoteJid;
-
-    try {
-      await handleMessage(from, msg);
-    } catch (e) {
-      console.error("handleMessage error:", e.message);
-    }
+    await handleMessage(msg);
 
     // ---- Download media and forward to webhook
     let mediaBuffer = null, mediaType = null, fileName = null, mimeType = null;
@@ -180,11 +172,11 @@ async function startSock(sessionId) {
       mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
     }
 
-    // Forward media to webhook
     if (mediaBuffer) {
       const form = new FormData();
       form.append("sessionId", sessionId);
-      form.append("from", from);
+      form.append("from", msg.key.remoteJid);
+      form.append("senderPn", extractSenderPn(msg));
       form.append("text", msg.message.conversation || "");
       form.append("mediaType", mediaType);
       form.append("mimeType", mimeType);
