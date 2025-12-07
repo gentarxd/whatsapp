@@ -16,7 +16,8 @@
   const WEBHOOK_URL = process.env.WEBHOOK_URL || "https://n8n.gentar.cloud/webhook/909d7c73-112a-455b-988c-9f770852c8fa";
   const PAUSE_MINUTES = parseInt(process.env.PAUSE_MINUTES || "60", 10);
   const PREFERRED_SESSION = process.env.PREFERRED_SESSION || "";
-
+const pauseUntil = {}; // holds paused JIDs
+function savePauseState() { writeJSON(path.join(DATA_DIR, "pause.json"), pauseUntil); }
   // ---- Ensure data folders
   const DATA_DIR = "./data";
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -148,78 +149,78 @@ sock.ev.on("messages.upsert", async ({ messages }) => {
         return;
     }
 
-    // لو العميل بعت رسالة -> البوت يرد
+    // استخراج النص / الميديا
+    let text =
+        msg.message.conversation ||
+        msg.message.extendedTextMessage?.text ||
+        msg.message.imageMessage?.caption ||
+        msg.message.videoMessage?.caption ||
+        msg.message.documentMessage?.caption ||
+        msg.message.audioMessage?.caption ||
+        "";
+
+    let mediaBuffer = null;
+    let mediaType = null;
+    let fileName = null;
+    let mimeType = null;
+
+    if (msg.message.imageMessage) {
+        mediaType = "image";
+        mimeType = msg.message.imageMessage.mimetype;
+        fileName = "image.jpg";
+        mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
+    } else if (msg.message.documentMessage) {
+        mediaType = "document";
+        mimeType = msg.message.documentMessage.mimetype;
+        fileName = msg.message.documentMessage.fileName || "document";
+        mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
+    } else if (msg.message.videoMessage) {
+        mediaType = "video";
+        mimeType = msg.message.videoMessage.mimetype;
+        fileName = "video.mp4";
+        mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
+    } else if (msg.message.audioMessage) {
+        mediaType = "audio";
+        mimeType = msg.message.audioMessage.mimetype;
+        fileName = "audio.mp3";
+        mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
+    }
+
+    // الرد الأوتوماتيكي للعميل
     await sock.sendMessage(from, { text: AUTO_REPLY_TEXT });
-
-    // البوت ما يفعّلش Pause هنا لأن الرد ده Bot reply مش manual
     console.log(`[BOT REPLIED] Auto reply sent to ${from}`);
-});
 
+    // بناء الويبهوك وإرساله
+    try {
+        const form = new FormData();
+        form.append("sessionId", sessionId);
+        form.append("from", from);
+        form.append("senderPn", senderPn);
+        form.append("type", type);
+        form.append("text", text || "");
+        form.append("mediaType", mediaType || "");
+        form.append("mimeType", mimeType || "");
+        form.append("fileName", fileName || "");
+        form.append("raw", JSON.stringify(msg));
 
-        // extract text/media
-        let text =
-          msg.message.conversation ||
-          msg.message.extendedTextMessage?.text ||
-          msg.message.imageMessage?.caption ||
-          msg.message.videoMessage?.caption ||
-          msg.message.documentMessage?.caption ||
-          msg.message.audioMessage?.caption ||
-          "";
-
-        let mediaBuffer = null;
-        let mediaType = null;
-        let fileName = null;
-        let mimeType = null;
-
-        if (msg.message.imageMessage) {
-          mediaType = "image";
-          mimeType = msg.message.imageMessage.mimetype;
-          fileName = "image.jpg";
-          mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
-        } else if (msg.message.documentMessage) {
-          mediaType = "document";
-          mimeType = msg.message.documentMessage.mimetype;
-          fileName = msg.message.documentMessage.fileName || "document";
-          mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
-        } else if (msg.message.videoMessage) {
-          mediaType = "video";
-          mimeType = msg.message.videoMessage.mimetype;
-          fileName = "video.mp4";
-          mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
-        } else if (msg.message.audioMessage) {
-          mediaType = "audio";
-          mimeType = msg.message.audioMessage.mimetype;
-          fileName = "audio.mp3";
-          mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
+        if (mediaBuffer) {
+            form.append("file", mediaBuffer, { filename: fileName, contentType: mimeType });
         }
 
-        // build webhook payload and send to configured webhook
-        try {
-          const form = new FormData();
-          form.append("sessionId", sessionId);
-          form.append("from", from);
-          form.append("senderPn", senderPn);
-          form.append("type", type);
-          form.append("text", text || "");
-          form.append("mediaType", mediaType || "");
-          form.append("mimeType", mimeType || "");
-          form.append("fileName", fileName || "");
-          form.append("raw", JSON.stringify(msg));
-          if (mediaBuffer) form.append("file", mediaBuffer, { filename: fileName, contentType: mimeType });
-          await axios.post(WEBHOOK_URL, form, { headers: form.getHeaders(), timeout: 20000 });
-          console.log(`[${PROJECT_NAME}] Message forwarded to webhook`);
-        } catch (e) {
-          console.error(`[${PROJECT_NAME}] Error forwarding to webhook:`, e?.message || e);
-        }
+        await axios.post(WEBHOOK_URL, form, {
+            headers: form.getHeaders(),
+            timeout: 20000,
+        });
 
-      } catch (e) {
-        console.error("messages.upsert error", e?.message || e);
-      }
-    });
+        console.log(`[${PROJECT_NAME}] Message forwarded to webhook`);
+    } catch (e) {
+        console.error(`[${PROJECT_NAME}] Error forwarding to webhook:`, e?.message || e);
+    }
 
-    sessions[sessionId] = sock;
-    return sock;
-  }
+}); // ← هنا قفلنا الـ event handler صح
+
+sessions[sessionId] = sock;
+return sock;
 
   // ---- simple reconnect existing sessions on boot
   function reconnectSessions() {
