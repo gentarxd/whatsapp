@@ -188,7 +188,32 @@ const app = express();
 app.use(express.json());
 
 app.get("/", (req, res) => res.send(`${PROJECT_NAME} running`));
+// ---- Create WhatsApp session
+app.post("/create-session", async (req, res) => {
+  try {
+    const { sessionId } = req.body;
+    if (!sessionId) return res.status(400).json({ error: "sessionId required" });
+    await startSock(sessionId);
+    res.json({ message: "session created", sessionId });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "failed to create session" });
+  }
+});
 
+// ---- Get QR code for session
+app.get("/get-qr/:sessionId", (req, res) => {
+  const { sessionId } = req.params;
+  const qr = qrCodes[sessionId];
+  if (!qr && sessionStatus[sessionId] === "open")
+    return res.json({ status: "success", message: "QR already scanned, session active" });
+  if (!qr) return res.status(404).json({ error: "No QR available" });
+  QRCode.toDataURL(qr).then(qrImage => {
+    const img = Buffer.from(qrImage.split(",")[1], "base64");
+    res.writeHead(200, { "Content-Type": "image/png", "Content-Length": img.length });
+    res.end(img);
+  }).catch(e => res.status(500).json({ error: "failed to generate qr" }));
+});
 app.post("/send-message", (req, res) => {
   const { sessionId, phone, text, imageUrl } = req.body;
   if (!sessionId || !phone) return res.status(400).json({ error: "sessionId and phone required" });
