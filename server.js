@@ -52,19 +52,11 @@ function canAutoReply(jid) { return !pauseUntil[jid] || Date.now() > pauseUntil[
 
 // ---- Extract senderPN
 function getSenderPN(msg) {
-  // لو فيه participant (جروب)
-  if (msg.key.participant) return msg.key.participant.split("@")[0];
-
-  // لو فيه senderPn مباشر (اللي فيه @s.whatsapp.net)
-  if (msg.key.senderPn) return msg.key.senderPn.split("@")[0];
-
-  // fallback على remoteJid لو فردي
-  if (msg.key.remoteJid && msg.key.remoteJid.includes("@s.whatsapp.net")) return msg.key.remoteJid.split("@")[0];
-
-  // fallback نهائي لأي حالة تانية
-  return msg.key.remoteJid ? msg.key.remoteJid.split("@")[0] : null;
+  if (msg.key.participant) return msg.key.participant.split("@")[0]; // جروب
+  if (msg.key.senderPn) return msg.key.senderPn.split("@")[0]; // موجود في الرسالة
+  if (msg.key.remoteJid && msg.key.remoteJid.includes("@s.whatsapp.net")) return msg.key.remoteJid.split("@")[0]; // فردي
+  return msg.key.remoteJid ? msg.key.remoteJid.split("@")[0] : null; // fallback
 }
-
 
 // ---- Handle incoming message
 async function handleMessage(msg) {
@@ -81,32 +73,35 @@ async function handleMessage(msg) {
     msg?.message?.audioMessage?.caption ||
     "";
 
-  // Detect human reply
-  const isReply = !!msg?.message?.extendedTextMessage?.contextInfo?.stanzaId;
+  // ---- كشف الرد البشري
+  const isReply =
+    !!msg?.message?.extendedTextMessage?.contextInfo?.stanzaId ||
+    !!msg?.message?.extendedTextMessage?.contextInfo?.quotedMessage;
 
   if (isReply) {
     pauseUntil[from] = now + PAUSE_MINUTES * 60 * 1000;
     savePauseFile();
-    console.log(`[${PROJECT_NAME}] Paused auto-reply for ${from} due to human reply`);
+    console.log(`[whatsapp-bot] Paused auto-reply for ${from} due to human reply`);
     return;
   }
 
+  // ---- تحقق من الباوز لو موجود
   if (pauseUntil[from] && pauseUntil[from] > now) {
-    console.log(`[${PROJECT_NAME}] Auto-reply paused for ${from} until ${new Date(pauseUntil[from]).toISOString()}`);
+    console.log(`[whatsapp-bot] Auto-reply still paused for ${from} until ${new Date(pauseUntil[from]).toISOString()}`);
     return;
   } else if (pauseUntil[from] && pauseUntil[from] <= now) {
     delete pauseUntil[from];
     savePauseFile();
-    console.log(`[${PROJECT_NAME}] Auto-reply resumed for ${from}`);
+    console.log(`[whatsapp-bot] Auto-reply resumed for ${from}`);
   }
 
-  // Forward to n8n
+  // ---- ارسال الرسالة لـ webhook
   const payload = { from, senderPN, text: textMsg, timestamp: now };
   try {
     await axios.post(WEBHOOK_URL, payload);
-    console.log(`[${PROJECT_NAME}] Forwarded message from ${senderPN} to n8n`);
+    console.log(`[whatsapp-bot] Forwarded message from ${senderPN} to n8n`);
   } catch (err) {
-    console.error(`[${PROJECT_NAME}] Failed to forward to n8n:`, err.message);
+    console.error(`[whatsapp-bot] Failed to forward to n8n:`, err.message);
   }
 }
 
@@ -162,18 +157,7 @@ async function startSock(sessionId) {
     const msg = m.messages[0];
     if (!msg.message || msg.key.fromMe) return;
 
-    const from = msg.key.remoteJid;
-    const senderPN = getSenderPN(msg);
-    const type = Object.keys(msg.message)[0];
-
-    let text =
-      msg.message.conversation ||
-      msg.message.extendedTextMessage?.text ||
-      msg.message.imageMessage?.caption ||
-      msg.message.videoMessage?.caption ||
-      msg.message.documentMessage?.caption ||
-      msg.message.audioMessage?.caption ||
-      null;
+    await handleMessage(msg);
 
     // ---- Download media
     let mediaBuffer = null, fileName = null, mimeType = null;
@@ -195,19 +179,19 @@ async function startSock(sessionId) {
       mimeType = msg.message.audioMessage.mimetype;
     }
 
-    // ---- Forward to webhook
+    // ---- Forward full message to webhook
     const form = new FormData();
     form.append("sessionId", sessionId);
-    form.append("from", from);
-    form.append("senderPN", senderPN);
-    form.append("type", type);
-    form.append("text", text || "");
+    form.append("from", msg.key.remoteJid);
+    form.append("senderPN", getSenderPN(msg));
+    form.append("type", Object.keys(msg.message)[0]);
+    form.append("text", msg.message.conversation || "");
     form.append("raw", JSON.stringify(msg));
     if (mediaBuffer) form.append("file", mediaBuffer, { filename: fileName, contentType: mimeType });
 
     try {
       await axios.post(WEBHOOK_URL, form, { headers: form.getHeaders(), timeout: 20000 });
-      console.log(`[${PROJECT_NAME}] Message forwarded from ${senderPN}`);
+      console.log(`[${PROJECT_NAME}] Message forwarded from ${getSenderPN(msg)}`);
     } catch (err) {
       console.error(`[${PROJECT_NAME}] Failed to forward message:`, err.message);
     }
