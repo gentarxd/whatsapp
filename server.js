@@ -52,10 +52,19 @@ function canAutoReply(jid) { return !pauseUntil[jid] || Date.now() > pauseUntil[
 
 // ---- Extract senderPN
 function getSenderPN(msg) {
-  if (msg.key.participant) return msg.key.participant.split("@")[0]; // جروب
-  if (msg.key.remoteJid && msg.key.remoteJid.includes("@s.whatsapp.net")) return msg.key.remoteJid.split("@")[0]; // فردي
-  return null;
+  // لو فيه participant (جروب)
+  if (msg.key.participant) return msg.key.participant.split("@")[0];
+
+  // لو فيه senderPn مباشر (اللي فيه @s.whatsapp.net)
+  if (msg.key.senderPn) return msg.key.senderPn.split("@")[0];
+
+  // fallback على remoteJid لو فردي
+  if (msg.key.remoteJid && msg.key.remoteJid.includes("@s.whatsapp.net")) return msg.key.remoteJid.split("@")[0];
+
+  // fallback نهائي لأي حالة تانية
+  return msg.key.remoteJid ? msg.key.remoteJid.split("@")[0] : null;
 }
+
 
 // ---- Handle incoming message
 async function handleMessage(msg) {
