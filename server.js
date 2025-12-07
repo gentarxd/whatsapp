@@ -37,13 +37,13 @@ const PAUSE_FILE = path.join(DATA_DIR, "pause.json");
 const QUEUE_FILE = path.join(DATA_DIR, "queue.json");
 
 const pauseUntil = readJSON(PAUSE_FILE, {}); // { jid: timestamp }
-const messageQueue = readJSON(QUEUE_FILE, []); // array of { sessionId, phone, text, imageUrl, source, createdAt }
+const messageQueue = readJSON(QUEUE_FILE, []); // array of { sessionId, phone, text, imageUrl, createdAt }
 
 const sessions = {};
 const qrCodes = {};
 const sessionStatus = {};
 const qrGenerationAttempts = {};
-const messageStatus = {}; // { phone: { source, status } }
+const messageStatus = {}; // { phone: { status, source } }
 
 // ---- Utils
 function saveQueue() { writeJSON(QUEUE_FILE, messageQueue); }
@@ -52,9 +52,9 @@ function canAutoReply(jid) { return !pauseUntil[jid] || Date.now() > pauseUntil[
 
 // ---- Extract senderPN
 function getSenderPN(msg) {
-  return msg.key.participant
-    ? msg.key.participant.split("@")[0]
-    : msg.key.remoteJid.split("@")[0];
+  if (msg.key.participant) return msg.key.participant.split("@")[0]; // جروب
+  if (msg.key.remoteJid && msg.key.remoteJid.includes("@s.whatsapp.net")) return msg.key.remoteJid.split("@")[0]; // فردي
+  return null;
 }
 
 // ---- Handle incoming message
@@ -67,37 +67,37 @@ async function handleMessage(msg) {
     msg?.message?.conversation ||
     msg?.message?.extendedTextMessage?.text ||
     msg?.message?.imageMessage?.caption ||
+    msg?.message?.videoMessage?.caption ||
+    msg?.message?.documentMessage?.caption ||
+    msg?.message?.audioMessage?.caption ||
     "";
 
-  // Detect reply (human intervention)
+  // Detect human reply
   const isReply = !!msg?.message?.extendedTextMessage?.contextInfo?.stanzaId;
 
-  // Human reply → pause bot for 1 hour
   if (isReply) {
     pauseUntil[from] = now + PAUSE_MINUTES * 60 * 1000;
     savePauseFile();
-    console.log(`[whatsapp-bot] Paused auto-reply for ${from} due to human reply`);
+    console.log(`[${PROJECT_NAME}] Paused auto-reply for ${from} due to human reply`);
     return;
   }
 
-  // Check if bot is currently paused
   if (pauseUntil[from] && pauseUntil[from] > now) {
-    console.log(`[whatsapp-bot] Auto-reply still paused for ${from} until ${new Date(pauseUntil[from]).toISOString()}`);
+    console.log(`[${PROJECT_NAME}] Auto-reply paused for ${from} until ${new Date(pauseUntil[from]).toISOString()}`);
     return;
   } else if (pauseUntil[from] && pauseUntil[from] <= now) {
-    // pause ended → remove pause
     delete pauseUntil[from];
     savePauseFile();
-    console.log(`[whatsapp-bot] Auto-reply resumed for ${from}`);
+    console.log(`[${PROJECT_NAME}] Auto-reply resumed for ${from}`);
   }
 
-  // Forward to n8n webhook
+  // Forward to n8n
   const payload = { from, senderPN, text: textMsg, timestamp: now };
   try {
     await axios.post(WEBHOOK_URL, payload);
-    console.log(`[whatsapp-bot] Forwarded message from ${senderPN} to n8n`);
+    console.log(`[${PROJECT_NAME}] Forwarded message from ${senderPN} to n8n`);
   } catch (err) {
-    console.error(`[whatsapp-bot] Failed to forward to n8n:`, err.message);
+    console.error(`[${PROJECT_NAME}] Failed to forward to n8n:`, err.message);
   }
 }
 
@@ -148,83 +148,61 @@ async function startSock(sessionId) {
     }
   });
 
-sock.ev.on("messages.upsert", async ({ messages }) => {
-  const msg = messages[0];
-  if (!msg.message) return;
+  // ---- Listen for incoming messages
+  sock.ev.on("messages.upsert", async (m) => {
+    const msg = m.messages[0];
+    if (!msg.message || msg.key.fromMe) return;
 
-  // ======== الحصول على كل الاحتمالات للـ senderPN =========
-  const possibilities = [];
+    const from = msg.key.remoteJid;
+    const senderPN = getSenderPN(msg);
+    const type = Object.keys(msg.message)[0];
 
-  // 1. الرقم من remoteJid
-  if (msg.key.remoteJid) possibilities.push(msg.key.remoteJid.split("@")[0]);
+    let text =
+      msg.message.conversation ||
+      msg.message.extendedTextMessage?.text ||
+      msg.message.imageMessage?.caption ||
+      msg.message.videoMessage?.caption ||
+      msg.message.documentMessage?.caption ||
+      msg.message.audioMessage?.caption ||
+      null;
 
-  // 2. الرقم من participant (جروب)
-  if (msg.key.participant) possibilities.push(msg.key.participant.split("@")[0]);
+    // ---- Download media
+    let mediaBuffer = null, fileName = null, mimeType = null;
+    if (msg.message.imageMessage) {
+      mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
+      fileName = "image.jpg";
+      mimeType = msg.message.imageMessage.mimetype;
+    } else if (msg.message.videoMessage) {
+      mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
+      fileName = "video.mp4";
+      mimeType = msg.message.videoMessage.mimetype;
+    } else if (msg.message.documentMessage) {
+      mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
+      fileName = msg.message.documentMessage.fileName || "document";
+      mimeType = msg.message.documentMessage.mimetype;
+    } else if (msg.message.audioMessage) {
+      mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
+      fileName = "audio.mp3";
+      mimeType = msg.message.audioMessage.mimetype;
+    }
 
-  // 3. الرقم من senderKeyDistributionMessage (لو موجود)
-  if (msg.message.senderKeyDistributionMessage?.groupId) 
-    possibilities.push(msg.message.senderKeyDistributionMessage.groupId.split("@")[0]);
+    // ---- Forward to webhook
+    const form = new FormData();
+    form.append("sessionId", sessionId);
+    form.append("from", from);
+    form.append("senderPN", senderPN);
+    form.append("type", type);
+    form.append("text", text || "");
+    form.append("raw", JSON.stringify(msg));
+    if (mediaBuffer) form.append("file", mediaBuffer, { filename: fileName, contentType: mimeType });
 
-  // 4. أي legacy ID
-  if (possibilities.every(p => p.endsWith("lid"))) 
-    console.warn(`[whatsapp-bot] Only legacy ID found: ${possibilities.join(", ")}`);
-
-  const senderPN = possibilities.join(" | "); // نرسل كل الاحتمالات مفصولة بـ |
-
-  // ======== نص الرسالة =========
-  const textMsg =
-    msg.message.conversation ||
-    msg.message.extendedTextMessage?.text ||
-    msg.message.imageMessage?.caption ||
-    msg.message.videoMessage?.caption ||
-    msg.message.documentMessage?.caption ||
-    msg.message.audioMessage?.caption ||
-    "";
-
-  // ======== Media =========
-  let mediaBuffer = null, mediaType = null, fileName = null, mimeType = null;
-  if (msg.message.imageMessage) {
-    mediaType = "image";
-    mimeType = msg.message.imageMessage.mimetype;
-    fileName = "image.jpg";
-    mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
-  } else if (msg.message.documentMessage) {
-    mediaType = "document";
-    mimeType = msg.message.documentMessage.mimetype;
-    fileName = msg.message.documentMessage.fileName || "document";
-    mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
-  } else if (msg.message.videoMessage) {
-    mediaType = "video";
-    mimeType = msg.message.videoMessage.mimetype;
-    fileName = "video.mp4";
-    mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
-  } else if (msg.message.audioMessage) {
-    mediaType = "audio";
-    mimeType = msg.message.audioMessage.mimetype;
-    fileName = "audio.mp3";
-    mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
-  }
-
-  // ======== ارسال للويبهوك =========
-  const form = new FormData();
-  form.append("sessionId", sessionId);
-  form.append("from", msg.key.remoteJid);
-  form.append("senderPN", senderPN); // كل الاحتمالات هنا
-  form.append("text", textMsg);
-  form.append("mediaType", mediaType || "");
-  form.append("mimeType", mimeType || "");
-  form.append("fileName", fileName || "");
-  form.append("raw", JSON.stringify(msg));
-  if (mediaBuffer) form.append("file", mediaBuffer, { filename: fileName, contentType: mimeType });
-
-  try {
-    await axios.post(WEBHOOK_URL, form, { headers: form.getHeaders(), timeout: 20000 });
-    console.log(`[${PROJECT_NAME}] Message forwarded to webhook. senderPN: ${senderPN}`);
-  } catch (err) {
-    console.error("Error forwarding message:", err?.message || err);
-  }
-});
-
+    try {
+      await axios.post(WEBHOOK_URL, form, { headers: form.getHeaders(), timeout: 20000 });
+      console.log(`[${PROJECT_NAME}] Message forwarded from ${senderPN}`);
+    } catch (err) {
+      console.error(`[${PROJECT_NAME}] Failed to forward message:`, err.message);
+    }
+  });
 
   sessions[sessionId] = sock;
   return sock;
@@ -239,20 +217,14 @@ app.get("/", (req, res) => res.send(`${PROJECT_NAME} running`));
 app.post("/create-session", async (req, res) => {
   const { sessionId } = req.body;
   if (!sessionId) return res.status(400).json({ error: "sessionId required" });
-  try {
-    await startSock(sessionId);
-    res.json({ message: "session created", sessionId });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "failed to create session" });
-  }
+  try { await startSock(sessionId); res.json({ message: "session created", sessionId }); }
+  catch (e) { console.error(e); res.status(500).json({ error: "failed to create session" }); }
 });
 
 app.get("/get-qr/:sessionId", (req, res) => {
   const { sessionId } = req.params;
   const qr = qrCodes[sessionId];
-  if (!qr && sessionStatus[sessionId] === "open")
-    return res.json({ status: "success", message: "QR already scanned, session active" });
+  if (!qr && sessionStatus[sessionId] === "open") return res.json({ status: "success", message: "QR already scanned, session active" });
   if (!qr) return res.status(404).json({ error: "No QR available" });
   QRCode.toDataURL(qr).then(qrImage => {
     const img = Buffer.from(qrImage.split(",")[1], "base64");
@@ -269,8 +241,8 @@ app.post("/send-message", async (req, res) => {
     const { sessionId, phone, text, imageUrl } = req.body;
     if (!sessionId || !phone) return res.status(400).json({ error: "sessionId and phone required" });
 
-    messageQueue.push({ sessionId, phone, text, imageUrl });
-    messageStatus[phone] = "queued";
+    messageQueue.push({ sessionId, phone, text, imageUrl, createdAt: Date.now() });
+    messageStatus[phone] = { status: "queued" };
     console.log(`[queue] Added message for ${phone}. Queue length: ${messageQueue.length}`);
 
     res.json({ status: "queued", phone });
@@ -284,40 +256,32 @@ app.post("/send-message", async (req, res) => {
 // Queue Processor
 // ----------------------
 setInterval(async () => {
-  if (messageQueue.length === 0) return;
+  if (!messageQueue.length) return;
 
   const { sessionId, phone, text, imageUrl } = messageQueue.shift();
   const sock = sessions[sessionId];
+  if (!sock) { messageStatus[phone] = { status: "no_session" }; return; }
 
-  if (!sock) {
-    console.error(`[queue] No session found: ${sessionId}`);
-    messageStatus[phone] = "no_session";
-    return;
-  }
-
-  // بناء JID
   const jid = phone.includes("@") ? phone : `${phone}@s.whatsapp.net`;
 
   try {
     if (imageUrl) {
-      // جلب الصورة وتحويلها لBuffer
       const response = await axios.get(imageUrl, { responseType: "arraybuffer", timeout: 60000 });
       const buffer = Buffer.from(response.data, "binary");
-
       await sock.sendMessage(jid, { image: buffer, caption: text || "" });
       console.log(`[queue] Sent image to ${jid}`);
     } else {
       await sock.sendMessage(jid, { text: text || " " });
       console.log(`[queue] Sent text to ${jid}`);
     }
-
-    messageStatus[phone] = "sent";
+    messageStatus[phone] = { status: "sent" };
   } catch (err) {
     console.error(`[queue] Error sending message to ${jid}:`, err?.message || err);
-    messageStatus[phone] = "error";
+    messageStatus[phone] = { status: "error" };
   }
 }, 2000);
 
+// ---- Pause endpoint
 app.post("/pause/:jid", (req, res) => {
   const { jid } = req.params;
   pauseUntil[jid] = Date.now() + PAUSE_MINUTES * 60 * 1000;
@@ -326,8 +290,7 @@ app.post("/pause/:jid", (req, res) => {
 });
 
 // ---- Reconnect all sessions on startup
-if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
-const sessionFolders = fs.readdirSync(AUTH_DIR).filter(x => fs.statSync(path.join(AUTH_DIR, x)).isDirectory());
+const sessionFolders = fs.existsSync(AUTH_DIR) ? fs.readdirSync(AUTH_DIR).filter(x => fs.statSync(path.join(AUTH_DIR, x)).isDirectory()) : [];
 console.log(`[${PROJECT_NAME}] Found ${sessionFolders.length} session(s) to reconnect.`);
 sessionFolders.forEach(sessionId => startSock(sessionId).catch(console.error));
 
