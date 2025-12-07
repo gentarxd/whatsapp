@@ -124,19 +124,37 @@
         console.error("connection.update error", e?.message || e);
       }
     });
+sock.ev.on("messages.upsert", async ({ messages }) => {
+    const msg = messages[0];
 
-    sock.ev.on("messages.upsert", async (m) => {
-      try {
-        const msg = m.messages[0];
-        if (!msg || !msg.message || msg.key.fromMe) return;
-        const from = msg.key.remoteJid;
-        const senderPn = (from || "").split("@")[0] || "";
-        const type = Object.keys(msg.message)[0];
-        // set override for this specific user for PAUSE_MINUTES
-        const pauseTimeMs = Date.now() + (PAUSE_MINUTES * 60 * 1000);
-        humanOverride[from] = pauseTimeMs;
-        saveOverrides();
-        console.log(`[${PROJECT_NAME}] Auto-reply paused for ${from} until ${new Date(pauseTimeMs).toISOString()}`);
+    // تجاهل رسائل البوت نفسه
+    if (!msg.message) return;
+
+    const from = msg.key.remoteJid;
+    const isFromMe = msg.key.fromMe === true;
+
+    // لو انت اللي رديت على العميل -> Pause
+    if (isFromMe) {
+        pauseUntil[from] = Date.now() + PAUSE_MINUTES * 60 * 1000;
+        savePauseState();
+        console.log(`[BOT PAUSED] User manually replied to ${from}`);
+        return;
+    }
+
+    // لو فيه Pause شغال للعميل -> تجاهل
+    if (pauseUntil[from] && Date.now() < pauseUntil[from]) {
+        const remaining = new Date(pauseUntil[from]).toISOString();
+        console.log(`[AUTO-PAUSE] Still paused for ${from} until ${remaining}`);
+        return;
+    }
+
+    // لو العميل بعت رسالة -> البوت يرد
+    await sock.sendMessage(from, { text: AUTO_REPLY_TEXT });
+
+    // البوت ما يفعّلش Pause هنا لأن الرد ده Bot reply مش manual
+    console.log(`[BOT REPLIED] Auto reply sent to ${from}`);
+});
+
 
         // extract text/media
         let text =
