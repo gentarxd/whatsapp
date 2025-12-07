@@ -148,56 +148,76 @@ async function startSock(sessionId) {
     }
   });
 
-  sock.ev.on("messages.upsert", async ({ messages }) => {
-    const msg = messages[0];
-    if (!msg.message) return;
+ sock.ev.on("messages.upsert", async ({ messages }) => {
+  const msg = messages[0];
+  if (!msg.message) return;
 
-    try { await handleMessage(msg); } catch (e) { console.error("handleMessage error:", e.message); }
+  try { 
+    await handleMessage(msg); 
+  } catch (e) { 
+    console.error("handleMessage error:", e.message); 
+  }
 
-    // ---- Download media and forward
-    let mediaBuffer = null, mediaType = null, fileName = null, mimeType = null;
-    if (msg.message.imageMessage) {
-      mediaType = "image";
-      mimeType = msg.message.imageMessage.mimetype;
-      fileName = "image.jpg";
-      mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
-    } else if (msg.message.documentMessage) {
-      mediaType = "document";
-      mimeType = msg.message.documentMessage.mimetype;
-      fileName = msg.message.documentMessage.fileName || "document";
-      mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
-    } else if (msg.message.videoMessage) {
-      mediaType = "video";
-      mimeType = msg.message.videoMessage.mimetype;
-      fileName = "video.mp4";
-      mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
-    } else if (msg.message.audioMessage) {
-      mediaType = "audio";
-      mimeType = msg.message.audioMessage.mimetype;
-      fileName = "audio.mp3";
-      mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
-    }
+  // ====== Download media ======
+  let mediaBuffer = null, mediaType = null, fileName = null, mimeType = null;
 
-    if (mediaBuffer) {
-      const form = new FormData();
-      form.append("sessionId", sessionId);
-      form.append("from", msg.key.remoteJid);
-      form.append("senderPN", getSenderPN(msg));
-      form.append("text", msg.message.conversation || "");
-      form.append("mediaType", mediaType);
-      form.append("mimeType", mimeType);
-      form.append("fileName", fileName);
-      form.append("raw", JSON.stringify(msg));
-      form.append("file", mediaBuffer, { filename: fileName, contentType: mimeType });
+  if (msg.message.imageMessage) {
+    mediaType = "image";
+    mimeType = msg.message.imageMessage.mimetype;
+    fileName = "image.jpg";
+    mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
+  } else if (msg.message.documentMessage) {
+    mediaType = "document";
+    mimeType = msg.message.documentMessage.mimetype;
+    fileName = msg.message.documentMessage.fileName || "document";
+    mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
+  } else if (msg.message.videoMessage) {
+    mediaType = "video";
+    mimeType = msg.message.videoMessage.mimetype;
+    fileName = "video.mp4";
+    mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
+  } else if (msg.message.audioMessage) {
+    mediaType = "audio";
+    mimeType = msg.message.audioMessage.mimetype;
+    fileName = "audio.mp3";
+    mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
+  }
 
-      try {
-        await axios.post(WEBHOOK_URL, form, { headers: form.getHeaders(), timeout: 20000 });
-        console.log(`[${PROJECT_NAME}] Media forwarded to webhook`);
-      } catch (e) {
-        console.error("Error forwarding media:", e.message);
-      }
-    }
-  });
+  // ====== Prepare form data ======
+  const form = new FormData();
+  form.append("sessionId", sessionId);
+  form.append("from", msg.key.remoteJid);
+
+  // ====== senderPN = الرقم الحقيقي مع كود الدولة ======
+  const senderPN = msg.key.remoteJid.split("@")[0];
+  form.append("senderPN", senderPN);
+
+  // ====== Other fields ======
+  const text = msg.message.conversation || 
+               msg.message.extendedTextMessage?.text || 
+               msg.message.imageMessage?.caption || 
+               msg.message.videoMessage?.caption || 
+               msg.message.documentMessage?.caption || 
+               msg.message.audioMessage?.caption || "" ;
+
+  form.append("text", text);
+  form.append("mediaType", mediaType || "");
+  form.append("mimeType", mimeType || "");
+  form.append("fileName", fileName || "");
+  form.append("raw", JSON.stringify(msg));
+
+  if (mediaBuffer) {
+    form.append("file", mediaBuffer, { filename: fileName, contentType: mimeType });
+  }
+
+  // ====== Send to webhook ======
+  try {
+    await axios.post(WEBHOOK_URL, form, { headers: form.getHeaders(), timeout: 20000 });
+    console.log(`[${PROJECT_NAME}] Message forwarded to webhook${mediaBuffer ? " with file" : ""}`);
+  } catch (e) {
+    console.error("Error forwarding message to webhook:", e.message);
+  }
+});
 
   sessions[sessionId] = sock;
   return sock;
