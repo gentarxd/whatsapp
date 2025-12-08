@@ -117,19 +117,28 @@ sock.ev.on("messages.upsert", async (m) => {
     const msg = m.messages[0];
     if (!msg.message) return;
 
-   const fromMe = !!msg.key.fromMe;
-let from, senderPN;
+    const fromMe = !!msg.key.fromMe;
+    let from, senderPN;
 
-if (fromMe) {
-    // البوت أرسل الرسالة → from = رقم البوت الحقيقي، senderPN = رقم البوت
     const BOT_NUMBER = "97433502059"; // ضع هنا رقم البوت بدون @s.whatsapp.net
-    from = BOT_NUMBER + "@s.whatsapp.net";
-    senderPN = BOT_NUMBER;
-} else {
-    // العميل أرسل الرسالة → from = رقم العميل، senderPN = رقم العميل
-    from = msg.key.remoteJid;
-    senderPN = getSenderPN(msg);
-}
+
+    if (fromMe) {
+        // البوت أرسل الرسالة → from = المستقبل (العميل)، senderPN = البوت
+        senderPN = BOT_NUMBER;
+
+        // لو الرسالة reply، ناخد الرقم الأصلي للعميل من contextInfo.participant
+        const isReply = !!msg.message?.extendedTextMessage?.contextInfo;
+        if (isReply && msg.message.extendedTextMessage.contextInfo?.participant) {
+            from = msg.message.extendedTextMessage.contextInfo.participant;
+        } else {
+            // غير ذلك، from = رقم العميل نفسه (remoteJid)
+            from = msg.key.remoteJid;
+        }
+    } else {
+        // العميل أرسل الرسالة → from = رقم العميل، senderPN = رقم العميل
+        from = msg.key.remoteJid;
+        senderPN = getSenderPN(msg);
+    }
 
     // تجاهل رسائل history أو التحديثات الداخلية
     if (msg.message.protocolMessage || from === "status@broadcast") return;
@@ -141,11 +150,11 @@ if (fromMe) {
     }
 
     // لو البوت رد بنفسه على العميل → pause
-    const isReply = !!msg.message?.extendedTextMessage?.contextInfo;
-    if (fromMe && isReply) {
-        pauseUntil[from] = Date.now() + PAUSE_MINUTES * 60 * 1000;
+    if (fromMe && msg.message?.extendedTextMessage?.contextInfo) {
+        const pauseTarget = msg.message.extendedTextMessage.contextInfo?.participant || from;
+        pauseUntil[pauseTarget] = Date.now() + PAUSE_MINUTES * 60 * 1000;
         savePauseFile();
-        console.log(`[whatsapp-bot] Paused bot for ${from}`);
+        console.log(`[whatsapp-bot] Paused bot for ${pauseTarget}`);
         return;
     }
 
