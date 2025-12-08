@@ -50,11 +50,20 @@ function savePauseFile() { writeJSON(PAUSE_FILE, pauseUntil); }
 
 // ---- Extract senderPN
 function getSenderPN(msg) {
-  if (msg.key.participant) return msg.key.participant.split("@")[0]; // جروب
-  if (msg.key.senderPn) return msg.key.senderPn.split("@")[0]; // موجود في الرسالة
-  if (msg.key.remoteJid && msg.key.remoteJid.includes("@s.whatsapp.net")) return msg.key.remoteJid.split("@")[0]; // فردي
+  // لو الرسالة من البوت نفسه
+  if (msg.key.fromMe) {
+    // خذ الرقم من الـ remoteJid مباشرة
+    const pn = msg.key.remoteJid?.split("@")[0];
+    return pn || null;
+  }
+
+  // رسائل من الغير
+  if (msg.key.participant) return msg.key.participant.split("@")[0];
+  if (msg.key.senderPn) return msg.key.senderPn.split("@")[0];
+  if (msg.key.remoteJid && msg.key.remoteJid.includes("@s.whatsapp.net")) return msg.key.remoteJid.split("@")[0];
   return msg.key.remoteJid ? msg.key.remoteJid.split("@")[0] : null;
 }
+
 
 // ---- WhatsApp socket
 async function startSock(sessionId) {
