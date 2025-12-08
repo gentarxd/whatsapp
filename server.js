@@ -173,14 +173,14 @@ async function startSock(sessionId) {
         }
     }
 
-    // إرسال للويبهوك
-    const form = new FormData();
-    form.append("sessionId", sessionId);
-    form.append("from", from);
-    form.append("senderPN", senderPN);
-    form.append("fromMe", fromMe);
-    form.append("text", text);
-    form.append("type", type);
+const form = new FormData();
+form.append("sessionId", String(sessionId));
+form.append("from", String(from || ""));
+form.append("senderPN", String(senderPN || ""));
+form.append("fromMe", String(fromMe)); // 👈 تم تحويل Boolean
+form.append("text", String(text || ""));
+form.append("type", String(type || "unknown")); // 👈 نتأكد مش undefined
+
 
     if (mediaBuffer && mimeType) {
         form.append("file", mediaBuffer, { filename: fileName, contentType: mimeType });
