@@ -114,56 +114,54 @@ async function startSock(sessionId) {
 
 // ---- Listen for incoming messages
 sock.ev.on("messages.upsert", async (m) => {
+    const msg = m.messages[0];
+    if (!msg.message) return;
+
+    const fromMe = !!msg.key.fromMe;
+    let from, senderPN;
+
+    if (fromMe) {
+        // البوت أرسل الرسالة → from = المستقبل (العميل)، senderPN = البوت
+        from = msg.key.remoteJid;
+        senderPN = msg.key.remoteJid.split("@")[0]; // الرقم الخاص بالبوت
+    } else {
+        // العميل أرسل الرسالة → from = العميل، senderPN = العميل
+        from = msg.key.remoteJid;
+        senderPN = getSenderPN(msg); // رقم العميل أو participant لو جروب
+    }
+
+    // تجاهل رسائل history أو التحديثات الداخلية
+    if (msg.message.protocolMessage || from === "status@broadcast") return;
+
+    // نظام الـ pause
+    if (pauseUntil[from] && Date.now() < pauseUntil[from]) {
+        console.log(`[whatsapp-bot] Bot paused for ${from}`);
+        return;
+    }
+
+    // لو البوت رد بنفسه على العميل → pause
+    const isReply = !!msg.message?.extendedTextMessage?.contextInfo;
+    if (fromMe && isReply) {
+        pauseUntil[from] = Date.now() + PAUSE_MINUTES * 60 * 1000;
+        savePauseFile();
+        console.log(`[whatsapp-bot] Paused bot for ${from}`);
+        return;
+    }
+
+    // --------- استخراج نص الرسالة ---------
+    let text = "";
+    if (msg.message?.conversation) text = msg.message.conversation;
+    else if (msg.message?.extendedTextMessage?.text) text = msg.message.extendedTextMessage.text;
+    else if (msg.message?.imageMessage?.caption) text = msg.message.imageMessage.caption;
+    else if (msg.message?.videoMessage?.caption) text = msg.message.videoMessage.caption;
+    else if (msg.message?.documentMessage?.caption) text = msg.message.documentMessage.caption;
+    else if (msg.message?.buttonsResponseMessage?.selectedButtonId) text = msg.message.buttonsResponseMessage.selectedButtonId;
+    else if (msg.message?.listResponseMessage?.singleSelectReply?.selectedRowId) text = msg.message.listResponseMessage.singleSelectReply.selectedRowId;
+    else text = "";
+
+    // --------- Download media ---------
+    let mediaBuffer = null, fileName = null, mimeType = null;
     try {
-        const msg = m.messages[0];
-        if (!msg?.message) return;
-
-        const from = msg.key.remoteJid;
-        const senderPN = getSenderPN(msg);
-        const fromMe = !!msg.key.fromMe;
-        const type = Object.keys(msg.message)[0];
-
-        // تجاهل رسائل داخلية / status
-        if (msg.message.protocolMessage || from === "status@broadcast") return;
-
-        // نظام الـ pause
-        if (pauseUntil[from] && Date.now() < pauseUntil[from]) {
-            console.log(`[whatsapp-bot] Bot paused for ${from}`);
-            return;
-        }
-
-        // لو انا عامل Reply → اقفل للرقم ده
-        const isReply =
-            !!msg.message.extendedTextMessage?.contextInfo?.stanzaId ||
-            !!msg.message.extendedTextMessage?.contextInfo?.quotedMessage;
-
-        if (fromMe && isReply) {
-            pauseUntil[from] = Date.now() + PAUSE_MINUTES * 60 * 1000;
-            savePauseFile();
-            console.log(`[whatsapp-bot] Paused bot for ${from}`);
-            return;
-        }
-
-        // --------- استخراج نص الرسالة ---------
-        let text = "";
-        if (msg.message?.conversation)
-            text = msg.message.conversation;
-        else if (msg.message?.extendedTextMessage?.text)
-            text = msg.message.extendedTextMessage.text;
-        else if (msg.message?.imageMessage?.caption)
-            text = msg.message.imageMessage.caption;
-        else if (msg.message?.videoMessage?.caption)
-            text = msg.message.videoMessage.caption;
-        else if (msg.message?.documentMessage?.caption)
-            text = msg.message.documentMessage.caption;
-        else if (msg.message?.buttonsResponseMessage?.selectedButtonId)
-            text = msg.message.buttonsResponseMessage.selectedButtonId;
-        else if (msg.message?.listResponseMessage?.singleSelectReply?.selectedRowId)
-            text = msg.message.listResponseMessage.singleSelectReply.selectedRowId;
-
-        // --------- Download media ---------
-        let mediaBuffer = null, fileName = null, mimeType = null;
-
         if (msg.message.imageMessage) {
             mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
             fileName = "image.jpg";
@@ -181,27 +179,30 @@ sock.ev.on("messages.upsert", async (m) => {
             fileName = "audio.mp3";
             mimeType = msg.message.audioMessage.mimetype;
         }
+    } catch (e) {
+        console.log("Media download failed:", e.message);
+    }
 
-        // --------- تجاهل الرسائل الفاضية ---------
-        if (!text && !mediaBuffer) {
-            console.log("[webhook] Ignored empty message");
-            return;
-        }
+    // --------- تجاهل الرسائل الفاضية ---------
+    if (!text && !mediaBuffer) {
+        console.log("[webhook] Ignored empty message");
+        return;
+    }
 
-        // --------- إرسال للـ webhook ---------
-        const form = new FormData();
-        form.append("sessionId", String(sessionId));
-        form.append("from", String(from || ""));
-        form.append("senderPN", String(senderPN || ""));
-        form.append("fromMe", String(fromMe));
-        form.append("isReply", String(isReply));
-        form.append("type", type || "");
-        form.append("text", text || "");
-        form.append("raw", JSON.stringify(msg));
+    // --------- إرسال للويبهوك ---------
+    const form = new FormData();
+    form.append("sessionId", String(sessionId));
+    form.append("from", String(from || ""));
+    form.append("senderPN", String(senderPN || ""));
+    form.append("fromMe", String(fromMe));
+    form.append("text", String(text || ""));
+    form.append("type", String(msg.message?.extendedTextMessage ? "extendedTextMessage" : "unknown"));
 
-        if (mediaBuffer && mimeType)
-            form.append("file", mediaBuffer, { filename: fileName, contentType: mimeType });
+    if (mediaBuffer && mimeType) {
+        form.append("file", mediaBuffer, { filename: fileName, contentType: mimeType });
+    }
 
+    try {
         await axios.post(WEBHOOK_URL, form, {
             headers: form.getHeaders(),
             timeout: 20000
@@ -211,6 +212,7 @@ sock.ev.on("messages.upsert", async (m) => {
         console.error(`[${PROJECT_NAME}] Failed Webhook:`, err.message);
     }
 });
+
 
 
   sessions[sessionId] = sock;
