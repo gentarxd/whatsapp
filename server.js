@@ -131,6 +131,10 @@ async function startSock(sessionId) {
         console.log(`[whatsapp-bot] Paused bot for ${from}`);
         return;
     }
+if (!text && !mediaBuffer) {
+    console.log("[webhook] Ignored empty message");
+    return;
+}
 
     // استخراج النص
     let text =
