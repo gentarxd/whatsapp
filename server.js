@@ -151,12 +151,13 @@ sock.ev.on("messages.upsert", async (m) => {
 
     // لو البوت رد بنفسه على العميل → pause
     if (fromMe && msg.message?.extendedTextMessage?.contextInfo) {
-        const pauseTarget = msg.message.extendedTextMessage.contextInfo?.participant || from;
-        pauseUntil[pauseTarget] = Date.now() + PAUSE_MINUTES * 60 * 1000;
-        savePauseFile();
-        console.log(`[whatsapp-bot] Paused bot for ${pauseTarget}`);
-        return;
-    }
+    const pauseTarget = msg.message.extendedTextMessage.contextInfo?.participant || msg.key.remoteJid;
+    pauseUntil[pauseTarget] = Date.now() + PAUSE_MINUTES * 60 * 1000;
+    savePauseFile();
+    console.log(`[whatsapp-bot] Paused bot for ${pauseTarget}`);
+    return;
+}
+
 
     // --------- استخراج نص الرسالة ---------
     let text = "";
