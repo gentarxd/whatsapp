@@ -104,102 +104,99 @@ async function startSock(sessionId) {
   });
 
   // ---- Listen for incoming messages
-  sock.ev.on("messages.upsert", async (m) => {
+ sock.ev.on("messages.upsert", async (m) => {
     const msg = m.messages[0];
     if (!msg.message) return;
 
     const from = msg.key.remoteJid;
     const senderPN = getSenderPN(msg);
-    const type = Object.keys(msg.message)[0];
-
     const fromMe = !!msg.key.fromMe;
 
-    // تحديد إن كانت الرسالة Reply
-    const isReply =
-        !!msg.message.extendedTextMessage?.contextInfo?.stanzaId ||
-        !!msg.message.extendedTextMessage?.contextInfo?.quotedMessage;
+    // تجاهل رسائل الـ history أو التحديثات الداخلية
+    if (msg.message.protocolMessage || msg.key.remoteJid === "status@broadcast") {
+        return;
+    }
 
-    // --------- نظام الـ pause ---------
-
-    // 1) لو البوت متوقف للرقم ده → متردش
+    // نظام الـ pause
     if (pauseUntil[from] && Date.now() < pauseUntil[from]) {
         console.log(`[whatsapp-bot] Bot paused for ${from}`);
         return;
     }
 
-    // 2) لو انت ردّيت Reply → اقفل البوت ساعة
+    // لو البوت رد بنفسه على العميل → pause
+    const isReply = !!msg.message?.extendedTextMessage?.contextInfo;
     if (fromMe && isReply) {
         pauseUntil[from] = Date.now() + PAUSE_MINUTES * 60 * 1000;
         savePauseFile();
-        console.log(`[whatsapp-bot] Paused bot for ${from} for ${PAUSE_MINUTES} minutes (reply from you).`);
-        return; // مهم جدًا: ممنوع نكمل معالجة الرسالة
+        console.log(`[whatsapp-bot] Paused bot for ${from}`);
+        return;
     }
 
-    // --------- استخراج نص الرسالة ---------
-    let text = "";
-if (msg.message?.conversation)
-    text = msg.message.conversation;
-else if (msg.message?.extendedTextMessage?.text)
-    text = msg.message.extendedTextMessage.text;
-else if (msg.message?.imageMessage?.caption)
-    text = msg.message.imageMessage.caption;
-else if (msg.message?.videoMessage?.caption)
-    text = msg.message.videoMessage.caption;
-else if (msg.message?.documentMessage?.caption)
-    text = msg.message.documentMessage.caption;
-else if (msg.message?.buttonsResponseMessage?.selectedButtonId)
-    text = msg.message.buttonsResponseMessage.selectedButtonId;
-else if (msg.message?.listResponseMessage?.singleSelectReply?.selectedRowId)
-    text = msg.message.listResponseMessage.singleSelectReply.selectedRowId;
-else
-    text = "";
+    // استخراج النص
+    let text =
+        msg.message?.conversation ||
+        msg.message?.extendedTextMessage?.text ||
+        msg.message?.imageMessage?.caption ||
+        msg.message?.videoMessage?.caption ||
+        msg.message?.documentMessage?.caption ||
+        msg.message?.buttonsResponseMessage?.selectedButtonId ||
+        msg.message?.listResponseMessage?.singleSelectReply?.selectedRowId ||
+        "";
 
+    // استخراج نوع الرسالة
+    const type = Object.keys(msg.message)[0];
 
-    // --------- Download media ---------
+    // تحميل ملف لو موجود
     let mediaBuffer = null, fileName = null, mimeType = null;
+    const msgType = msg.message;
+    const downloadable =
+        msgType.imageMessage || msgType.videoMessage || msgType.documentMessage || msgType.audioMessage;
 
-    if (msg.message.imageMessage) {
-        mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
-        fileName = "image.jpg";
-        mimeType = msg.message.imageMessage.mimetype;
-    } else if (msg.message.videoMessage) {
-        mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
-        fileName = "video.mp4";
-        mimeType = msg.message.videoMessage.mimetype;
-    } else if (msg.message.documentMessage) {
-        mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
-        fileName = msg.message.documentMessage.fileName || "document";
-        mimeType = msg.message.documentMessage.mimetype;
-    } else if (msg.message.audioMessage) {
-        mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
-        fileName = "audio.mp3";
-        mimeType = msg.message.audioMessage.mimetype;
+    if (downloadable) {
+        try {
+            mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
+            if (msgType.imageMessage) {
+                fileName = "image.jpg";
+                mimeType = msgType.imageMessage.mimetype;
+            } else if (msgType.videoMessage) {
+                fileName = "video.mp4";
+                mimeType = msgType.videoMessage.mimetype;
+            } else if (msgType.documentMessage) {
+                fileName = msgType.documentMessage.fileName || "file";
+                mimeType = msgType.documentMessage.mimetype;
+            } else if (msgType.audioMessage) {
+                fileName = "audio.mp3";
+                mimeType = msgType.audioMessage.mimetype;
+            }
+        } catch (e) {
+            console.log("Media download failed:", e.message);
+        }
     }
 
-    // --------- إرسال للـ webhook ---------
+    // إرسال للويبهوك
     const form = new FormData();
     form.append("sessionId", sessionId);
     form.append("from", from);
     form.append("senderPN", senderPN);
     form.append("fromMe", fromMe);
-    form.append("isReply", isReply);
+    form.append("text", text);
     form.append("type", type);
-    form.append("text", text || "");
-    form.append("raw", JSON.stringify(msg));
 
-    if (mediaBuffer)
+    if (mediaBuffer && mimeType) {
         form.append("file", mediaBuffer, { filename: fileName, contentType: mimeType });
+    }
 
     try {
         await axios.post(WEBHOOK_URL, form, {
             headers: form.getHeaders(),
             timeout: 20000
         });
-        console.log(`[${PROJECT_NAME}] Forwarded from ${senderPN}, fromMe: ${fromMe}, isReply: ${isReply}`);
+        console.log(`[${PROJECT_NAME}] Forwarded message from ${senderPN}`);
     } catch (err) {
-        console.error(`[${PROJECT_NAME}] Failed to forward message:`, err.message);
+        console.error(`[${PROJECT_NAME}] Failed Webhook:`, err.message);
     }
 });
+
   sessions[sessionId] = sock;
   return sock;
 }
