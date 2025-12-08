@@ -144,19 +144,23 @@ sock.ev.on("messages.upsert", async (m) => {
     if (msg.message.protocolMessage || from === "status@broadcast") return;
 
     // نظام الـ pause
-    if (pauseUntil[from] && Date.now() < pauseUntil[from]) {
-        console.log(`[whatsapp-bot] Bot paused for ${from}`);
-        return;
-    }
+    const cleanFrom = (from || "").split("@")[0];
+if (pauseUntil[cleanFrom] && Date.now() < pauseUntil[cleanFrom]) {
+    console.log(`[whatsapp-bot] Bot paused for ${cleanFrom}`);
+    return;
+}
 
-    // لو البوت رد بنفسه على العميل → pause
+
     if (fromMe && msg.message?.extendedTextMessage?.contextInfo) {
-    const pauseTarget = msg.message.extendedTextMessage.contextInfo?.participant || msg.key.remoteJid;
+    let pauseTarget = msg.message.extendedTextMessage.contextInfo?.participant || msg.key.remoteJid;
+    pauseTarget = pauseTarget.split("@")[0]; // <<< مهم جدا
+
     pauseUntil[pauseTarget] = Date.now() + PAUSE_MINUTES * 60 * 1000;
     savePauseFile();
     console.log(`[whatsapp-bot] Paused bot for ${pauseTarget}`);
     return;
 }
+
 
 
     // --------- استخراج نص الرسالة ---------
@@ -222,6 +226,11 @@ sock.ev.on("messages.upsert", async (m) => {
     } catch (err) {
         console.error(`[${PROJECT_NAME}] Failed Webhook:`, err.message);
     }
+  if (pauseUntil[cleanFrom] && Date.now() >= pauseUntil[cleanFrom]) {
+    delete pauseUntil[cleanFrom];
+    savePauseFile();
+}
+
 });
 
 
