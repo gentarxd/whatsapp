@@ -117,18 +117,19 @@ sock.ev.on("messages.upsert", async (m) => {
     const msg = m.messages[0];
     if (!msg.message) return;
 
-    const fromMe = !!msg.key.fromMe;
-    let from, senderPN;
+   const fromMe = !!msg.key.fromMe;
+let from, senderPN;
 
-    if (fromMe) {
-        // البوت أرسل الرسالة → from = المستقبل (العميل)، senderPN = البوت
-        from = msg.key.remoteJid;
-        senderPN = msg.key.remoteJid.split("@")[0]; // الرقم الخاص بالبوت
-    } else {
-        // العميل أرسل الرسالة → from = العميل، senderPN = العميل
-        from = msg.key.remoteJid;
-        senderPN = getSenderPN(msg); // رقم العميل أو participant لو جروب
-    }
+if (fromMe) {
+    // البوت أرسل الرسالة → from = رقم البوت الحقيقي، senderPN = رقم البوت
+    const BOT_NUMBER = "97433502059"; // ضع هنا رقم البوت بدون @s.whatsapp.net
+    from = BOT_NUMBER + "@s.whatsapp.net";
+    senderPN = BOT_NUMBER;
+} else {
+    // العميل أرسل الرسالة → from = رقم العميل، senderPN = رقم العميل
+    from = msg.key.remoteJid;
+    senderPN = getSenderPN(msg);
+}
 
     // تجاهل رسائل history أو التحديثات الداخلية
     if (msg.message.protocolMessage || from === "status@broadcast") return;
