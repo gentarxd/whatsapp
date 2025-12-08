@@ -106,54 +106,67 @@ async function startSock(sessionId) {
   // ---- Listen for incoming messages
   sock.ev.on("messages.upsert", async (m) => {
     const msg = m.messages[0];
-    if (!msg.message || msg.key.fromMe) return;
+    if (!msg.message) return;
 
     const from = msg.key.remoteJid;
     const senderPN = getSenderPN(msg);
     const type = Object.keys(msg.message)[0];
 
-    let text =
-      msg.message.conversation ||
-      msg.message.extendedTextMessage?.text ||
-      msg.message.imageMessage?.caption ||
-      msg.message.videoMessage?.caption ||
-      msg.message.documentMessage?.caption ||
-      msg.message.audioMessage?.caption ||
-      "";
-
     const fromMe = !!msg.key.fromMe;
+
+    // تحديد إن كانت الرسالة Reply
     const isReply =
-      !!msg.message.extendedTextMessage?.contextInfo?.stanzaId ||
-      !!msg.message.extendedTextMessage?.contextInfo?.quotedMessage;
+        !!msg.message.extendedTextMessage?.contextInfo?.stanzaId ||
+        !!msg.message.extendedTextMessage?.contextInfo?.quotedMessage;
 
-    // ---- لو الرد من البوت نفسه (fromMe) نوقف إرسال رسائل للعميل لمدة ساعة
-    if (isReply && fromMe) {
-      pauseUntil[from] = Date.now() + PAUSE_MINUTES * 60 * 1000;
-      savePauseFile();
-      console.log(`[whatsapp-bot] Paused sending messages to ${from} for ${PAUSE_MINUTES} minutes due to bot reply`);
+    // --------- نظام الـ pause ---------
+
+    // 1) لو البوت متوقف للرقم ده → متردش
+    if (pauseUntil[from] && Date.now() < pauseUntil[from]) {
+        console.log(`[whatsapp-bot] Bot paused for ${from}`);
+        return;
     }
 
-    // ---- Download media لو موجود
+    // 2) لو انت ردّيت Reply → اقفل البوت ساعة
+    if (fromMe && isReply) {
+        pauseUntil[from] = Date.now() + PAUSE_MINUTES * 60 * 1000;
+        savePauseFile();
+        console.log(`[whatsapp-bot] Paused bot for ${from} for ${PAUSE_MINUTES} minutes (reply from you).`);
+        return; // مهم جدًا: ممنوع نكمل معالجة الرسالة
+    }
+
+    // --------- استخراج نص الرسالة ---------
+    let text =
+        msg.message.conversation ||
+        msg.message.extendedTextMessage?.text ||
+        msg.message.imageMessage?.caption ||
+        msg.message.videoMessage?.caption ||
+        msg.message.documentMessage?.caption ||
+        msg.message.audioMessage?.caption ||
+        "";
+
+    // --------- Download media ---------
     let mediaBuffer = null, fileName = null, mimeType = null;
+
     if (msg.message.imageMessage) {
-      mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
-      fileName = "image.jpg";
-      mimeType = msg.message.imageMessage.mimetype;
+        mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
+        fileName = "image.jpg";
+        mimeType = msg.message.imageMessage.mimetype;
     } else if (msg.message.videoMessage) {
-      mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
-      fileName = "video.mp4";
-      mimeType = msg.message.videoMessage.mimetype;
+        mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
+        fileName = "video.mp4";
+        mimeType = msg.message.videoMessage.mimetype;
     } else if (msg.message.documentMessage) {
-      mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
-      fileName = msg.message.documentMessage.fileName || "document";
-      mimeType = msg.message.documentMessage.mimetype;
+        mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
+        fileName = msg.message.documentMessage.fileName || "document";
+        mimeType = msg.message.documentMessage.mimetype;
     } else if (msg.message.audioMessage) {
-      mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
-      fileName = "audio.mp3";
-      mimeType = msg.message.audioMessage.mimetype;
+        mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
+        fileName = "audio.mp3";
+        mimeType = msg.message.audioMessage.mimetype;
     }
 
-    // ---- إرسال للـ webhook
+    // --------- إرسال للـ webhook ---------
     const form = new FormData();
     form.append("sessionId", sessionId);
     form.append("from", from);
@@ -163,16 +176,20 @@ async function startSock(sessionId) {
     form.append("type", type);
     form.append("text", text || "");
     form.append("raw", JSON.stringify(msg));
-    if (mediaBuffer) form.append("file", mediaBuffer, { filename: fileName, contentType: mimeType });
+
+    if (mediaBuffer)
+        form.append("file", mediaBuffer, { filename: fileName, contentType: mimeType });
 
     try {
-      await axios.post(WEBHOOK_URL, form, { headers: form.getHeaders(), timeout: 20000 });
-      console.log(`[${PROJECT_NAME}] Message forwarded from ${senderPN}, fromMe: ${fromMe}, isReply: ${isReply}`);
+        await axios.post(WEBHOOK_URL, form, {
+            headers: form.getHeaders(),
+            timeout: 20000
+        });
+        console.log(`[${PROJECT_NAME}] Forwarded from ${senderPN}, fromMe: ${fromMe}, isReply: ${isReply}`);
     } catch (err) {
-      console.error(`[${PROJECT_NAME}] Failed to forward message:`, err.message);
+        console.error(`[${PROJECT_NAME}] Failed to forward message:`, err.message);
     }
-  });
-
+});
   sessions[sessionId] = sock;
   return sock;
 }
