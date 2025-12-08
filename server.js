@@ -136,14 +136,24 @@ async function startSock(sessionId) {
     }
 
     // --------- استخراج نص الرسالة ---------
-    let text =
-        msg.message.conversation ||
-        msg.message.extendedTextMessage?.text ||
-        msg.message.imageMessage?.caption ||
-        msg.message.videoMessage?.caption ||
-        msg.message.documentMessage?.caption ||
-        msg.message.audioMessage?.caption ||
-        "";
+    let text = "";
+if (msg.message?.conversation)
+    text = msg.message.conversation;
+else if (msg.message?.extendedTextMessage?.text)
+    text = msg.message.extendedTextMessage.text;
+else if (msg.message?.imageMessage?.caption)
+    text = msg.message.imageMessage.caption;
+else if (msg.message?.videoMessage?.caption)
+    text = msg.message.videoMessage.caption;
+else if (msg.message?.documentMessage?.caption)
+    text = msg.message.documentMessage.caption;
+else if (msg.message?.buttonsResponseMessage?.selectedButtonId)
+    text = msg.message.buttonsResponseMessage.selectedButtonId;
+else if (msg.message?.listResponseMessage?.singleSelectReply?.selectedRowId)
+    text = msg.message.listResponseMessage.singleSelectReply.selectedRowId;
+else
+    text = "";
+
 
     // --------- Download media ---------
     let mediaBuffer = null, fileName = null, mimeType = null;
