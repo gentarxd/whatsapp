@@ -103,94 +103,96 @@ async function startSock(sessionId) {
     }
   });
 
-  // ---- Listen for incoming messages
- sock.ev.on("messages.upsert", async (m) => {
-    const msg = m.messages[0];
-    if (!msg.message) return;
-
-    const from = msg.key.remoteJid;
-    const senderPN = getSenderPN(msg);
-    const fromMe = !!msg.key.fromMe;
-
-    // تجاهل رسائل الـ history أو التحديثات الداخلية
-    if (msg.message.protocolMessage || msg.key.remoteJid === "status@broadcast") {
-        return;
-    }
-
-    // نظام الـ pause
-    if (pauseUntil[from] && Date.now() < pauseUntil[from]) {
-        console.log(`[whatsapp-bot] Bot paused for ${from}`);
-        return;
-    }
-
-    // لو البوت رد بنفسه على العميل → pause
-    const isReply = !!msg.message?.extendedTextMessage?.contextInfo;
-    if (fromMe && isReply) {
-        pauseUntil[from] = Date.now() + PAUSE_MINUTES * 60 * 1000;
-        savePauseFile();
-        console.log(`[whatsapp-bot] Paused bot for ${from}`);
-        return;
-    }
-if (!text && !mediaBuffer) {
-    console.log("[webhook] Ignored empty message");
-    return;
-}
-
-    // استخراج النص
-    let text =
-        msg.message?.conversation ||
-        msg.message?.extendedTextMessage?.text ||
-        msg.message?.imageMessage?.caption ||
-        msg.message?.videoMessage?.caption ||
-        msg.message?.documentMessage?.caption ||
-        msg.message?.buttonsResponseMessage?.selectedButtonId ||
-        msg.message?.listResponseMessage?.singleSelectReply?.selectedRowId ||
-        "";
-
-    // استخراج نوع الرسالة
-    const type = Object.keys(msg.message)[0];
-
-    // تحميل ملف لو موجود
-    let mediaBuffer = null, fileName = null, mimeType = null;
-    const msgType = msg.message;
-    const downloadable =
-        msgType.imageMessage || msgType.videoMessage || msgType.documentMessage || msgType.audioMessage;
-
-    if (downloadable) {
-        try {
-            mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
-            if (msgType.imageMessage) {
-                fileName = "image.jpg";
-                mimeType = msgType.imageMessage.mimetype;
-            } else if (msgType.videoMessage) {
-                fileName = "video.mp4";
-                mimeType = msgType.videoMessage.mimetype;
-            } else if (msgType.documentMessage) {
-                fileName = msgType.documentMessage.fileName || "file";
-                mimeType = msgType.documentMessage.mimetype;
-            } else if (msgType.audioMessage) {
-                fileName = "audio.mp3";
-                mimeType = msgType.audioMessage.mimetype;
-            }
-        } catch (e) {
-            console.log("Media download failed:", e.message);
-        }
-    }
-
-const form = new FormData();
-form.append("sessionId", String(sessionId));
-form.append("from", String(from || ""));
-form.append("senderPN", String(senderPN || ""));
-form.append("fromMe", String(fromMe)); // 👈 تم تحويل Boolean
-form.append("text", String(text || ""));
-form.append("type", String(type || "unknown")); // 👈 نتأكد مش undefined
-
-
-    if (mediaBuffer && mimeType) {
-        form.append("file", mediaBuffer, { filename: fileName, contentType: mimeType });
-    }
-
+// ---- Listen for incoming messages
+sock.ev.on("messages.upsert", async (m) => {
     try {
+        const msg = m.messages[0];
+        if (!msg?.message) return;
+
+        const from = msg.key.remoteJid;
+        const senderPN = getSenderPN(msg);
+        const fromMe = !!msg.key.fromMe;
+        const type = Object.keys(msg.message)[0];
+
+        // تجاهل رسائل داخلية / status
+        if (msg.message.protocolMessage || from === "status@broadcast") return;
+
+        // نظام الـ pause
+        if (pauseUntil[from] && Date.now() < pauseUntil[from]) {
+            console.log(`[whatsapp-bot] Bot paused for ${from}`);
+            return;
+        }
+
+        // لو انا عامل Reply → اقفل للرقم ده
+        const isReply =
+            !!msg.message.extendedTextMessage?.contextInfo?.stanzaId ||
+            !!msg.message.extendedTextMessage?.contextInfo?.quotedMessage;
+
+        if (fromMe && isReply) {
+            pauseUntil[from] = Date.now() + PAUSE_MINUTES * 60 * 1000;
+            savePauseFile();
+            console.log(`[whatsapp-bot] Paused bot for ${from}`);
+            return;
+        }
+
+        // --------- استخراج نص الرسالة ---------
+        let text = "";
+        if (msg.message?.conversation)
+            text = msg.message.conversation;
+        else if (msg.message?.extendedTextMessage?.text)
+            text = msg.message.extendedTextMessage.text;
+        else if (msg.message?.imageMessage?.caption)
+            text = msg.message.imageMessage.caption;
+        else if (msg.message?.videoMessage?.caption)
+            text = msg.message.videoMessage.caption;
+        else if (msg.message?.documentMessage?.caption)
+            text = msg.message.documentMessage.caption;
+        else if (msg.message?.buttonsResponseMessage?.selectedButtonId)
+            text = msg.message.buttonsResponseMessage.selectedButtonId;
+        else if (msg.message?.listResponseMessage?.singleSelectReply?.selectedRowId)
+            text = msg.message.listResponseMessage.singleSelectReply.selectedRowId;
+
+        // --------- Download media ---------
+        let mediaBuffer = null, fileName = null, mimeType = null;
+
+        if (msg.message.imageMessage) {
+            mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
+            fileName = "image.jpg";
+            mimeType = msg.message.imageMessage.mimetype;
+        } else if (msg.message.videoMessage) {
+            mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
+            fileName = "video.mp4";
+            mimeType = msg.message.videoMessage.mimetype;
+        } else if (msg.message.documentMessage) {
+            mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
+            fileName = msg.message.documentMessage.fileName || "document";
+            mimeType = msg.message.documentMessage.mimetype;
+        } else if (msg.message.audioMessage) {
+            mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
+            fileName = "audio.mp3";
+            mimeType = msg.message.audioMessage.mimetype;
+        }
+
+        // --------- تجاهل الرسائل الفاضية ---------
+        if (!text && !mediaBuffer) {
+            console.log("[webhook] Ignored empty message");
+            return;
+        }
+
+        // --------- إرسال للـ webhook ---------
+        const form = new FormData();
+        form.append("sessionId", String(sessionId));
+        form.append("from", String(from || ""));
+        form.append("senderPN", String(senderPN || ""));
+        form.append("fromMe", String(fromMe));
+        form.append("isReply", String(isReply));
+        form.append("type", type || "");
+        form.append("text", text || "");
+        form.append("raw", JSON.stringify(msg));
+
+        if (mediaBuffer && mimeType)
+            form.append("file", mediaBuffer, { filename: fileName, contentType: mimeType });
+
         await axios.post(WEBHOOK_URL, form, {
             headers: form.getHeaders(),
             timeout: 20000
@@ -200,6 +202,7 @@ form.append("type", String(type || "unknown")); // 👈 نتأكد مش undefine
         console.error(`[${PROJECT_NAME}] Failed Webhook:`, err.message);
     }
 });
+
 
   sessions[sessionId] = sock;
   return sock;
