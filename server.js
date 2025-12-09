@@ -49,7 +49,8 @@ async function startSock(sessionId) {
       auth: state,
       
       // 👇 ضيف السطر ده هنا
-      browser: ["Ubuntu", "Chrome", "20.0.04"], 
+    // تحديث نسخة الأوبنتو
+browser: ["Ubuntu", "Chrome", "22.04.0"],
 
       // منع مزامنة التاريخ بالكامل
       shouldSyncHistoryMessage: () => false,
