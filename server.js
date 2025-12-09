@@ -14,6 +14,7 @@ const AUTH_DIR = process.env.AUTH_DIR || "./data/auth_info";
 const DATA_DIR = "./data";
 const WEBHOOK_URL = process.env.WEBHOOK_URL || "https://n8n.gentar.cloud/webhook/909d7c73-112a-455b-988c-9f770852c8fa";
 const PAUSE_MINUTES = parseInt(process.env.PAUSE_MINUTES || "60", 10);
+const MAX_RETRIES = parseInt(process.env.MAX_RETRIES || "3", 10);
 
 // ---- Ensure folders
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -22,13 +23,23 @@ if (!fs.existsSync("./downloads")) fs.mkdirSync("./downloads", { recursive: true
 
 // ---- Persistence helpers
 function readJSON(file, fallback) {
-  try { if (fs.existsSync(file)) return JSON.parse(fs.readFileSync(file, "utf8") || "null") || fallback; } 
-  catch (e) { console.error("readJSON error", file, e?.message || e); }
+  try { 
+    if (fs.existsSync(file)) {
+      const content = fs.readFileSync(file, "utf8");
+      return JSON.parse(content || "null") || fallback;
+    }
+  } catch (e) { 
+    console.error("readJSON error", file, e?.message || e); 
+  }
   return fallback;
 }
+
 function writeJSON(file, data) {
-  try { fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf8"); } 
-  catch (e) { console.error("writeJSON error", file, e?.message || e); }
+  try { 
+    fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf8"); 
+  } catch (e) { 
+    console.error("writeJSON error", file, e?.message || e); 
+  }
 }
 
 // ---- State
@@ -36,34 +47,51 @@ const PAUSE_FILE = path.join(DATA_DIR, "pause.json");
 const QUEUE_FILE = path.join(DATA_DIR, "queue.json");
 
 const pauseUntil = readJSON(PAUSE_FILE, {}); // { jid: timestamp }
-const messageQueue = readJSON(QUEUE_FILE, []); // array of { sessionId, phone, text, imageUrl, createdAt }
+const messageQueue = readJSON(QUEUE_FILE, []); // array of { sessionId, phone, text, imageUrl, createdAt, retries }
 
 const sessions = {};
 const qrCodes = {};
 const sessionStatus = {};
 const qrGenerationAttempts = {};
-const messageStatus = {}; // { phone: { status } }
+const messageStatus = {}; // { phone: { status, timestamp } }
+const sentMessageIds = new Set(); // تتبع الرسائل المرسلة من البوت API
 
 // ---- Utils
 function saveQueue() { writeJSON(QUEUE_FILE, messageQueue); }
 function savePauseFile() { writeJSON(PAUSE_FILE, pauseUntil); }
 
-// ---- Extract senderPN
-function getSenderPN(msg) {
-  // لو الرسالة من البوت نفسه
-  if (msg.key.fromMe) {
-    // خذ الرقم من الـ remoteJid مباشرة
-    const pn = msg.key.remoteJid?.split("@")[0];
-    return pn || null;
+// Clean old message statuses (keep only last hour)
+function cleanupMessageStatus() {
+  const oneHourAgo = Date.now() - 3600000;
+  Object.keys(messageStatus).forEach(phone => {
+    if (messageStatus[phone].timestamp < oneHourAgo) {
+      delete messageStatus[phone];
+    }
+  });
+  
+  // Clean old message IDs (keep only last 1000)
+  if (sentMessageIds.size > 1000) {
+    const arr = Array.from(sentMessageIds);
+    arr.slice(0, arr.length - 1000).forEach(id => sentMessageIds.delete(id));
   }
+}
+setInterval(cleanupMessageStatus, 300000); // Every 5 minutes
 
-  // رسائل من الغير
-  if (msg.key.participant) return msg.key.participant.split("@")[0];
-  if (msg.key.senderPn) return msg.key.senderPn.split("@")[0];
-  if (msg.key.remoteJid && msg.key.remoteJid.includes("@s.whatsapp.net")) return msg.key.remoteJid.split("@")[0];
-  return msg.key.remoteJid ? msg.key.remoteJid.split("@")[0] : null;
+// Normalize phone number to remove @s.whatsapp.net
+function normalizePhone(phone) {
+  return phone ? phone.split("@")[0] : "";
 }
 
+// ---- Get bot number dynamically
+function getBotNumber(sock) {
+  try {
+    const botJid = sock?.user?.id;
+    return botJid ? normalizePhone(botJid) : null;
+  } catch (e) {
+    console.error("Failed to get bot number:", e.message);
+    return null;
+  }
+}
 
 // ---- WhatsApp socket
 async function startSock(sessionId) {
@@ -84,25 +112,31 @@ async function startSock(sessionId) {
   });
 
   const pingInterval = setInterval(() => {
-    try { if (sock?.ws?.readyState === 1) sock.sendPresence("available"); } catch (e) {}
+    try { 
+      if (sock?.ws?.readyState === 1) sock.sendPresence("available"); 
+    } catch (e) {}
   }, 60 * 1000);
 
   sock.ev.on("creds.update", saveCreds);
 
   sock.ev.on("connection.update", (update) => {
     const { connection, qr } = update;
+    
     if (qr) {
       qrGenerationAttempts[sessionId] = (qrGenerationAttempts[sessionId] || 0) + 1;
       qrCodes[sessionId] = qr;
       sessionStatus[sessionId] = "qr";
-      console.log(`[${PROJECT_NAME}] QR generated for ${sessionId}`);
+      console.log(`[${PROJECT_NAME}] QR generated for ${sessionId} (attempt ${qrGenerationAttempts[sessionId]})`);
     }
+    
     if (connection === "open") {
       sessionStatus[sessionId] = "open";
       delete qrCodes[sessionId];
       qrGenerationAttempts[sessionId] = 0;
-      console.log(`[${PROJECT_NAME}] Session ${sessionId} open`);
+      const botNumber = getBotNumber(sock);
+      console.log(`[${PROJECT_NAME}] Session ${sessionId} open (Bot: ${botNumber})`);
     }
+    
     if (connection === "close") {
       sessionStatus[sessionId] = "close";
       clearInterval(pingInterval);
@@ -112,128 +146,153 @@ async function startSock(sessionId) {
     }
   });
 
-// ---- Listen for incoming messages
-sock.ev.on("messages.upsert", async (m) => {
+  // ---- Listen for incoming messages
+  sock.ev.on("messages.upsert", async (m) => {
     const msg = m.messages[0];
     if (!msg.message) return;
 
     const fromMe = !!msg.key.fromMe;
+    const messageId = msg.key.id;
     let from, senderPN;
 
-    const BOT_NUMBER = "97433502059"; // ضع هنا رقم البوت بدون @s.whatsapp.net
-
-    if (fromMe) {
-        // البوت أرسل الرسالة → from = المستقبل (العميل)، senderPN = البوت
-        senderPN = BOT_NUMBER;
-
-        // لو الرسالة reply، ناخد الرقم الأصلي للعميل من contextInfo.participant
-        const isReply = !!msg.message?.extendedTextMessage?.contextInfo;
-        if (isReply && msg.message.extendedTextMessage.contextInfo?.participant) {
-            from = msg.message.extendedTextMessage.contextInfo.participant;
-        } else {
-            // غير ذلك، from = رقم العميل نفسه (remoteJid)
-            from = msg.key.remoteJid;
-        }
-    } else {
-        // العميل أرسل الرسالة → from = رقم العميل، senderPN = رقم العميل
-        from = msg.key.remoteJid;
-        senderPN = getSenderPN(msg);
+    const BOT_NUMBER = getBotNumber(sock);
+    if (!BOT_NUMBER) {
+      console.error("[webhook] Could not determine bot number");
+      return;
     }
 
-    // تجاهل رسائل history أو التحديثات الداخلية
+    if (fromMe) {
+      // Bot sent the message
+      senderPN = BOT_NUMBER;
+
+      // If it's a reply, get the original client number from contextInfo
+      const isReply = !!msg.message?.extendedTextMessage?.contextInfo;
+      if (isReply && msg.message.extendedTextMessage.contextInfo?.participant) {
+        from = msg.message.extendedTextMessage.contextInfo.participant;
+      } else {
+        from = msg.key.remoteJid;
+      }
+    } else {
+      // Client sent the message
+      from = msg.key.remoteJid;
+      senderPN = msg.key.participant?.split("@")[0] || 
+                 msg.key.remoteJid?.split("@")[0] || 
+                 null;
+    }
+
+    // Ignore protocol messages and status updates
     if (msg.message.protocolMessage || from === "status@broadcast") return;
 
-    // نظام الـ pause
-    const cleanFrom = (from || "").split("@")[0];
-if (pauseUntil[cleanFrom] && Date.now() < pauseUntil[cleanFrom]) {
-    console.log(`[whatsapp-bot] Bot paused for ${cleanFrom}`);
-    return;
-}
+    // Normalize numbers for pause system
+    const cleanFrom = normalizePhone(from);
+    const cleanSenderPN = normalizePhone(senderPN);
 
+    // Check if bot is paused for this contact
+    if (pauseUntil[cleanFrom] && Date.now() < pauseUntil[cleanFrom]) {
+      console.log(`[${PROJECT_NAME}] Bot paused for ${cleanFrom} until ${new Date(pauseUntil[cleanFrom]).toISOString()}`);
+      return;
+    }
 
-    if (fromMe && msg.message?.extendedTextMessage?.contextInfo) {
-    let pauseTarget = msg.message.extendedTextMessage.contextInfo?.participant || msg.key.remoteJid;
-    pauseTarget = pauseTarget.split("@")[0]; // <<< مهم جدا
+    // ⭐ الجزء المهم: تحديد إذا كانت رسالة يدوية أو أوتوماتيك
+    if (fromMe) {
+      const isManualReply = msg.message?.extendedTextMessage?.contextInfo && 
+                           !sentMessageIds.has(messageId);
+      
+      // لو رسالة يدوية (reply من الواتساب مباشرة، مش من API)
+      if (isManualReply) {
+        let pauseTarget = msg.message.extendedTextMessage.contextInfo?.participant || msg.key.remoteJid;
+        pauseTarget = normalizePhone(pauseTarget);
 
-    pauseUntil[pauseTarget] = Date.now() + PAUSE_MINUTES * 60 * 1000;
-    savePauseFile();
-    console.log(`[whatsapp-bot] Paused bot for ${pauseTarget}`);
-    return;
-}
+        pauseUntil[pauseTarget] = Date.now() + PAUSE_MINUTES * 60 * 1000;
+        savePauseFile();
+        console.log(`[${PROJECT_NAME}] ⏸️  Paused bot for ${pauseTarget} for ${PAUSE_MINUTES} minutes (manual reply detected)`);
+        return; // ما نبعتش للويبهوك
+      }
+      
+      // لو رسالة من API، نشيلها من الـ Set عشان منخزنش كتير
+      sentMessageIds.delete(messageId);
+    }
 
-
-
-    // --------- استخراج نص الرسالة ---------
+    // --------- Extract message text ---------
     let text = "";
-    if (msg.message?.conversation) text = msg.message.conversation;
-    else if (msg.message?.extendedTextMessage?.text) text = msg.message.extendedTextMessage.text;
-    else if (msg.message?.imageMessage?.caption) text = msg.message.imageMessage.caption;
-    else if (msg.message?.videoMessage?.caption) text = msg.message.videoMessage.caption;
-    else if (msg.message?.documentMessage?.caption) text = msg.message.documentMessage.caption;
-    else if (msg.message?.buttonsResponseMessage?.selectedButtonId) text = msg.message.buttonsResponseMessage.selectedButtonId;
-    else if (msg.message?.listResponseMessage?.singleSelectReply?.selectedRowId) text = msg.message.listResponseMessage.singleSelectReply.selectedRowId;
-    else text = "";
+    if (msg.message?.conversation) {
+      text = msg.message.conversation;
+    } else if (msg.message?.extendedTextMessage?.text) {
+      text = msg.message.extendedTextMessage.text;
+    } else if (msg.message?.imageMessage?.caption) {
+      text = msg.message.imageMessage.caption;
+    } else if (msg.message?.videoMessage?.caption) {
+      text = msg.message.videoMessage.caption;
+    } else if (msg.message?.documentMessage?.caption) {
+      text = msg.message.documentMessage.caption;
+    } else if (msg.message?.buttonsResponseMessage?.selectedButtonId) {
+      text = msg.message.buttonsResponseMessage.selectedButtonId;
+    } else if (msg.message?.listResponseMessage?.singleSelectReply?.selectedRowId) {
+      text = msg.message.listResponseMessage.singleSelectReply.selectedRowId;
+    }
 
     // --------- Download media ---------
     let mediaBuffer = null, fileName = null, mimeType = null;
     try {
-        if (msg.message.imageMessage) {
-            mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
-            fileName = "image.jpg";
-            mimeType = msg.message.imageMessage.mimetype;
-        } else if (msg.message.videoMessage) {
-            mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
-            fileName = "video.mp4";
-            mimeType = msg.message.videoMessage.mimetype;
-        } else if (msg.message.documentMessage) {
-            mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
-            fileName = msg.message.documentMessage.fileName || "document";
-            mimeType = msg.message.documentMessage.mimetype;
-        } else if (msg.message.audioMessage) {
-            mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
-            fileName = "audio.mp3";
-            mimeType = msg.message.audioMessage.mimetype;
-        }
+      if (msg.message.imageMessage) {
+        mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
+        fileName = "image.jpg";
+        mimeType = msg.message.imageMessage.mimetype || "image/jpeg";
+      } else if (msg.message.videoMessage) {
+        mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
+        fileName = "video.mp4";
+        mimeType = msg.message.videoMessage.mimetype || "video/mp4";
+      } else if (msg.message.documentMessage) {
+        mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
+        fileName = msg.message.documentMessage.fileName || "document";
+        mimeType = msg.message.documentMessage.mimetype || "application/octet-stream";
+      } else if (msg.message.audioMessage) {
+        mediaBuffer = await downloadMediaMessage(msg, "buffer", {}, { logger: null });
+        fileName = "audio.mp3";
+        mimeType = msg.message.audioMessage.mimetype || "audio/mpeg";
+      }
     } catch (e) {
-        console.log("Media download failed:", e.message);
+      console.error("[webhook] Media download failed:", e.message);
     }
 
-    // --------- تجاهل الرسائل الفاضية ---------
+    // --------- Ignore empty messages ---------
     if (!text && !mediaBuffer) {
-        console.log("[webhook] Ignored empty message");
-        return;
+      console.log("[webhook] Ignored empty message");
+      return;
     }
 
-    // --------- إرسال للويبهوك ---------
+    // --------- Send to webhook ---------
     const form = new FormData();
     form.append("sessionId", String(sessionId));
     form.append("from", String(from || ""));
-    form.append("senderPN", String(senderPN || ""));
+    form.append("senderPN", String(cleanSenderPN || ""));
     form.append("fromMe", String(fromMe));
     form.append("text", String(text || ""));
-    form.append("type", String(msg.message?.extendedTextMessage ? "extendedTextMessage" : "unknown"));
+    form.append("type", String(msg.message?.extendedTextMessage ? "extendedTextMessage" : "message"));
+    form.append("messageId", String(messageId || ""));
+    form.append("timestamp", String(msg.messageTimestamp || Date.now()));
 
     if (mediaBuffer && mimeType) {
-        form.append("file", mediaBuffer, { filename: fileName, contentType: mimeType });
+      form.append("file", mediaBuffer, { filename: fileName, contentType: mimeType });
     }
 
     try {
-        await axios.post(WEBHOOK_URL, form, {
-            headers: form.getHeaders(),
-            timeout: 20000
-        });
-        console.log(`[${PROJECT_NAME}] Forwarded message from ${senderPN}`);
+      await axios.post(WEBHOOK_URL, form, {
+        headers: form.getHeaders(),
+        timeout: 20000
+      });
+      console.log(`[${PROJECT_NAME}] ✅ Forwarded message from ${cleanSenderPN} to webhook`);
     } catch (err) {
-        console.error(`[${PROJECT_NAME}] Failed Webhook:`, err.message);
+      console.error(`[${PROJECT_NAME}] ❌ Webhook failed:`, err.message);
     }
-  if (pauseUntil[cleanFrom] && Date.now() >= pauseUntil[cleanFrom]) {
-    delete pauseUntil[cleanFrom];
-    savePauseFile();
-}
 
-});
-
-
+    // Clean up expired pauses
+    if (pauseUntil[cleanFrom] && Date.now() >= pauseUntil[cleanFrom]) {
+      delete pauseUntil[cleanFrom];
+      savePauseFile();
+      console.log(`[${PROJECT_NAME}] ▶️  Pause expired for ${cleanFrom}`);
+    }
+  });
 
   sessions[sessionId] = sock;
   return sock;
@@ -243,41 +302,144 @@ if (pauseUntil[cleanFrom] && Date.now() < pauseUntil[cleanFrom]) {
 const app = express();
 app.use(express.json());
 
-app.get("/", (req, res) => res.send(`${PROJECT_NAME} running`));
+app.get("/", (req, res) => {
+  res.json({ 
+    service: PROJECT_NAME, 
+    status: "running",
+    sessions: Object.keys(sessions).length,
+    queueLength: messageQueue.length,
+    pausedContacts: Object.keys(pauseUntil).length
+  });
+});
 
 app.post("/create-session", async (req, res) => {
   const { sessionId } = req.body;
   if (!sessionId) return res.status(400).json({ error: "sessionId required" });
-  try { await startSock(sessionId); res.json({ message: "session created", sessionId }); }
-  catch (e) { console.error(e); res.status(500).json({ error: "failed to create session" }); }
+  
+  try { 
+    await startSock(sessionId); 
+    res.json({ 
+      message: "session created", 
+      sessionId,
+      status: sessionStatus[sessionId] || "initializing"
+    }); 
+  } catch (e) { 
+    console.error(e); 
+    res.status(500).json({ error: "failed to create session", details: e.message }); 
+  }
+});
+
+app.get("/session-status/:sessionId", (req, res) => {
+  const { sessionId } = req.params;
+  const status = sessionStatus[sessionId] || "not_found";
+  const hasQR = !!qrCodes[sessionId];
+  
+  res.json({ 
+    sessionId, 
+    status,
+    hasQR,
+    qrAttempts: qrGenerationAttempts[sessionId] || 0
+  });
 });
 
 app.get("/get-qr/:sessionId", (req, res) => {
   const { sessionId } = req.params;
   const qr = qrCodes[sessionId];
-  if (!qr && sessionStatus[sessionId] === "open") return res.json({ status: "success", message: "QR already scanned, session active" });
-  if (!qr) return res.status(404).json({ error: "No QR available" });
-  QRCode.toDataURL(qr).then(qrImage => {
-    const img = Buffer.from(qrImage.split(",")[1], "base64");
-    res.writeHead(200, { "Content-Type": "image/png", "Content-Length": img.length });
-    res.end(img);
-  }).catch(e => res.status(500).json({ error: "failed to generate qr" }));
+  
+  if (!qr && sessionStatus[sessionId] === "open") {
+    return res.json({ status: "success", message: "QR already scanned, session active" });
+  }
+  
+  if (!qr) {
+    return res.status(404).json({ error: "No QR available" });
+  }
+  
+  QRCode.toDataURL(qr)
+    .then(qrImage => {
+      const img = Buffer.from(qrImage.split(",")[1], "base64");
+      res.writeHead(200, { 
+        "Content-Type": "image/png", 
+        "Content-Length": img.length 
+      });
+      res.end(img);
+    })
+    .catch(e => res.status(500).json({ error: "failed to generate qr", details: e.message }));
 });
 
-// ---- Send-message endpoint
 app.post("/send-message", async (req, res) => {
   try {
     const { sessionId, phone, text, imageUrl } = req.body;
-    if (!sessionId || !phone) return res.status(400).json({ error: "sessionId and phone required" });
+    
+    if (!sessionId || !phone) {
+      return res.status(400).json({ error: "sessionId and phone required" });
+    }
 
-    messageQueue.push({ sessionId, phone, text, imageUrl, createdAt: Date.now() });
-    messageStatus[phone] = { status: "queued" };
-    console.log(`[queue] Added message for ${phone}. Queue length: ${messageQueue.length}`);
-
-    res.json({ status: "queued", phone });
+    const normalizedPhone = normalizePhone(phone);
+    
+    messageQueue.push({ 
+      sessionId, 
+      phone: normalizedPhone, 
+      text, 
+      imageUrl, 
+      createdAt: Date.now(),
+      retries: 0
+    });
+    
+    messageStatus[normalizedPhone] = { 
+      status: "queued", 
+      timestamp: Date.now() 
+    };
+    
+    saveQueue();
+    
+    console.log(`[queue] 📥 Added message for ${normalizedPhone}. Queue length: ${messageQueue.length}`);
+    res.json({ status: "queued", phone: normalizedPhone, queuePosition: messageQueue.length });
+    
   } catch (err) {
     console.error("/send-message error:", err?.message || err);
-    res.status(500).json({ error: "failed to queue message" });
+    res.status(500).json({ error: "failed to queue message", details: err.message });
+  }
+});
+
+app.get("/message-status/:phone", (req, res) => {
+  const phone = normalizePhone(req.params.phone);
+  const status = messageStatus[phone] || { status: "unknown" };
+  res.json({ phone, ...status });
+});
+
+app.get("/queue-status", (req, res) => {
+  res.json({
+    queueLength: messageQueue.length,
+    messages: messageQueue.map(m => ({
+      phone: m.phone,
+      createdAt: m.createdAt,
+      retries: m.retries,
+      age: Date.now() - m.createdAt
+    }))
+  });
+});
+
+app.get("/paused-contacts", (req, res) => {
+  const now = Date.now();
+  const paused = Object.entries(pauseUntil)
+    .filter(([_, time]) => time > now)
+    .map(([phone, time]) => ({
+      phone,
+      pausedUntil: new Date(time).toISOString(),
+      remainingMinutes: Math.ceil((time - now) / 60000)
+    }));
+  
+  res.json({ pausedContacts: paused });
+});
+
+app.post("/unpause/:phone", (req, res) => {
+  const phone = normalizePhone(req.params.phone);
+  if (pauseUntil[phone]) {
+    delete pauseUntil[phone];
+    savePauseFile();
+    res.json({ message: `▶️  Unpaused bot for ${phone}` });
+  } else {
+    res.json({ message: `Bot was not paused for ${phone}` });
   }
 });
 
@@ -285,40 +447,68 @@ app.post("/send-message", async (req, res) => {
 setInterval(async () => {
   if (!messageQueue.length) return;
 
-  const { sessionId, phone, text, imageUrl } = messageQueue[0]; // تحقق قبل shift
+  const item = messageQueue[0];
+  const { sessionId, phone, text, imageUrl, retries = 0 } = item;
   const now = Date.now();
 
+  // Check if paused
   if (pauseUntil[phone] && pauseUntil[phone] > now) {
-    console.log(`[queue] Skipping ${phone}, paused until ${new Date(pauseUntil[phone]).toISOString()}`);
+    console.log(`[queue] ⏸️  Skipping ${phone}, paused until ${new Date(pauseUntil[phone]).toISOString()}`);
     return;
   }
 
-  messageQueue.shift(); // نشيلها بعد التأكد
+  // Remove from queue
+  messageQueue.shift();
+  saveQueue();
+
   const sock = sessions[sessionId];
-  if (!sock) { messageStatus[phone] = { status: "no_session" }; return; }
+  
+  if (!sock) {
+    console.error(`[queue] ❌ No active session for ${sessionId}`);
+    messageStatus[phone] = { status: "no_session", timestamp: now };
+    
+    // Retry if under limit
+    if (retries < MAX_RETRIES) {
+      item.retries = retries + 1;
+      messageQueue.push(item);
+      saveQueue();
+      console.log(`[queue] 🔄 Re-queued message for ${phone} (retry ${item.retries}/${MAX_RETRIES})`);
+    }
+    return;
+  }
 
   const jid = phone.includes("@") ? phone : `${phone}@s.whatsapp.net`;
 
   try {
+    let sentMsg;
+    
     if (imageUrl) {
-      const response = await axios.get(imageUrl, { responseType: "arraybuffer", timeout: 60000 });
+      const response = await axios.get(imageUrl, { 
+        responseType: "arraybuffer", 
+        timeout: 60000 
+      });
       const buffer = Buffer.from(response.data, "binary");
-      await sock.sendMessage(jid, { image: buffer, caption: text || "" });
-      console.log(`[queue] Sent image to ${jid}`);
+      sentMsg = await sock.sendMessage(jid, { image: buffer, caption: text || "" });
+      console.log(`[queue] 📸 Sent image to ${jid}`);
     } else {
-      await sock.sendMessage(jid, { text: text || " " });
-      console.log(`[queue] Sent text to ${jid}`);
+      sentMsg = await sock.sendMessage(jid, { text: text || " " });
+      console.log(`[queue] 💬 Sent text to ${jid}`);
     }
-    messageStatus[phone] = { status: "sent" };
+    
+    // ⭐ تسجيل الـ message ID عشان نعرف إنها من API
+    if (sentMsg?.key?.id) {
+      sentMessageIds.add(sentMsg.key.id);
+    }
+    
+    messageStatus[phone] = { status: "sent", timestamp: now };
+    
   } catch (err) {
-    console.error(`[queue] Error sending message to ${jid}:`, err?.message || err);
-    messageStatus[phone] = { status: "error" };
-  }
-}, 2000);
-
-// ---- Reconnect all sessions on startup
-const sessionFolders = fs.existsSync(AUTH_DIR) ? fs.readdirSync(AUTH_DIR).filter(x => fs.statSync(path.join(AUTH_DIR, x)).isDirectory()) : [];
-console.log(`[${PROJECT_NAME}] Found ${sessionFolders.length} session(s) to reconnect.`);
-sessionFolders.forEach(sessionId => startSock(sessionId).catch(console.error));
-
-app.listen(PORT, () => console.log(`[${PROJECT_NAME}] Server running on port ${PORT}`));
+    console.error(`[queue] ❌ Error sending to ${jid}:`, err?.message || err);
+    messageStatus[phone] = { status: "error", timestamp: now, error: err.message };
+    
+    // Retry if under limit
+    if (retries < MAX_RETRIES) {
+      item.retries = retries + 1;
+      messageQueue.push(item);
+      saveQueue();
+      console.log(`[queue] �
