@@ -46,21 +46,20 @@ function writeJSON(file, data) {
 const PAUSE_FILE = path.join(DATA_DIR, "pause.json");
 const QUEUE_FILE = path.join(DATA_DIR, "queue.json");
 
-const pauseUntil = readJSON(PAUSE_FILE, {}); // { jid: timestamp }
-const messageQueue = readJSON(QUEUE_FILE, []); // array of { sessionId, phone, text, imageUrl, createdAt, retries }
+const pauseUntil = readJSON(PAUSE_FILE, {});
+const messageQueue = readJSON(QUEUE_FILE, []);
 
 const sessions = {};
 const qrCodes = {};
 const sessionStatus = {};
 const qrGenerationAttempts = {};
-const messageStatus = {}; // { phone: { status, timestamp } }
-const sentMessageIds = new Set(); // تتبع الرسائل المرسلة من البوت API
+const messageStatus = {};
+const sentMessageIds = new Set();
 
 // ---- Utils
 function saveQueue() { writeJSON(QUEUE_FILE, messageQueue); }
 function savePauseFile() { writeJSON(PAUSE_FILE, pauseUntil); }
 
-// Clean old message statuses (keep only last hour)
 function cleanupMessageStatus() {
   const oneHourAgo = Date.now() - 3600000;
   Object.keys(messageStatus).forEach(phone => {
@@ -69,20 +68,17 @@ function cleanupMessageStatus() {
     }
   });
   
-  // Clean old message IDs (keep only last 1000)
   if (sentMessageIds.size > 1000) {
     const arr = Array.from(sentMessageIds);
     arr.slice(0, arr.length - 1000).forEach(id => sentMessageIds.delete(id));
   }
 }
-setInterval(cleanupMessageStatus, 300000); // Every 5 minutes
+setInterval(cleanupMessageStatus, 300000);
 
-// Normalize phone number to remove @s.whatsapp.net
 function normalizePhone(phone) {
   return phone ? phone.split("@")[0] : "";
 }
 
-// ---- Get bot number dynamically
 function getBotNumber(sock) {
   try {
     const botJid = sock?.user?.id;
@@ -114,7 +110,9 @@ async function startSock(sessionId) {
   const pingInterval = setInterval(() => {
     try { 
       if (sock?.ws?.readyState === 1) sock.sendPresence("available"); 
-    } catch (e) {}
+    } catch (e) {
+      // ignore
+    }
   }, 60 * 1000);
 
   sock.ev.on("creds.update", saveCreds);
@@ -146,7 +144,6 @@ async function startSock(sessionId) {
     }
   });
 
-  // ---- Listen for incoming messages
   sock.ev.on("messages.upsert", async (m) => {
     const msg = m.messages[0];
     if (!msg.message) return;
@@ -162,10 +159,7 @@ async function startSock(sessionId) {
     }
 
     if (fromMe) {
-      // Bot sent the message
       senderPN = BOT_NUMBER;
-
-      // If it's a reply, get the original client number from contextInfo
       const isReply = !!msg.message?.extendedTextMessage?.contextInfo;
       if (isReply && msg.message.extendedTextMessage.contextInfo?.participant) {
         from = msg.message.extendedTextMessage.contextInfo.participant;
@@ -173,47 +167,39 @@ async function startSock(sessionId) {
         from = msg.key.remoteJid;
       }
     } else {
-      // Client sent the message
       from = msg.key.remoteJid;
       senderPN = msg.key.participant?.split("@")[0] || 
                  msg.key.remoteJid?.split("@")[0] || 
                  null;
     }
 
-    // Ignore protocol messages and status updates
     if (msg.message.protocolMessage || from === "status@broadcast") return;
 
-    // Normalize numbers for pause system
     const cleanFrom = normalizePhone(from);
     const cleanSenderPN = normalizePhone(senderPN);
 
-    // Check if bot is paused for this contact
     if (pauseUntil[cleanFrom] && Date.now() < pauseUntil[cleanFrom]) {
       console.log(`[${PROJECT_NAME}] Bot paused for ${cleanFrom} until ${new Date(pauseUntil[cleanFrom]).toISOString()}`);
       return;
     }
 
-    // ⭐ الجزء المهم: تحديد إذا كانت رسالة يدوية أو أوتوماتيك
     if (fromMe) {
       const isManualReply = msg.message?.extendedTextMessage?.contextInfo && 
                            !sentMessageIds.has(messageId);
       
-      // لو رسالة يدوية (reply من الواتساب مباشرة، مش من API)
       if (isManualReply) {
         let pauseTarget = msg.message.extendedTextMessage.contextInfo?.participant || msg.key.remoteJid;
         pauseTarget = normalizePhone(pauseTarget);
 
         pauseUntil[pauseTarget] = Date.now() + PAUSE_MINUTES * 60 * 1000;
         savePauseFile();
-        console.log(`[${PROJECT_NAME}] ⏸️  Paused bot for ${pauseTarget} for ${PAUSE_MINUTES} minutes (manual reply detected)`);
-        return; // ما نبعتش للويبهوك
+        console.log(`[${PROJECT_NAME}] Paused bot for ${pauseTarget} for ${PAUSE_MINUTES} minutes (manual reply detected)`);
+        return;
       }
       
-      // لو رسالة من API، نشيلها من الـ Set عشان منخزنش كتير
       sentMessageIds.delete(messageId);
     }
 
-    // --------- Extract message text ---------
     let text = "";
     if (msg.message?.conversation) {
       text = msg.message.conversation;
@@ -231,7 +217,6 @@ async function startSock(sessionId) {
       text = msg.message.listResponseMessage.singleSelectReply.selectedRowId;
     }
 
-    // --------- Download media ---------
     let mediaBuffer = null, fileName = null, mimeType = null;
     try {
       if (msg.message.imageMessage) {
@@ -255,13 +240,11 @@ async function startSock(sessionId) {
       console.error("[webhook] Media download failed:", e.message);
     }
 
-    // --------- Ignore empty messages ---------
     if (!text && !mediaBuffer) {
       console.log("[webhook] Ignored empty message");
       return;
     }
 
-    // --------- Send to webhook ---------
     const form = new FormData();
     form.append("sessionId", String(sessionId));
     form.append("from", String(from || ""));
@@ -281,16 +264,15 @@ async function startSock(sessionId) {
         headers: form.getHeaders(),
         timeout: 20000
       });
-      console.log(`[${PROJECT_NAME}] ✅ Forwarded message from ${cleanSenderPN} to webhook`);
+      console.log(`[${PROJECT_NAME}] Forwarded message from ${cleanSenderPN} to webhook`);
     } catch (err) {
-      console.error(`[${PROJECT_NAME}] ❌ Webhook failed:`, err.message);
+      console.error(`[${PROJECT_NAME}] Webhook failed:`, err.message);
     }
 
-    // Clean up expired pauses
     if (pauseUntil[cleanFrom] && Date.now() >= pauseUntil[cleanFrom]) {
       delete pauseUntil[cleanFrom];
       savePauseFile();
-      console.log(`[${PROJECT_NAME}] ▶️  Pause expired for ${cleanFrom}`);
+      console.log(`[${PROJECT_NAME}] Pause expired for ${cleanFrom}`);
     }
   });
 
@@ -298,7 +280,6 @@ async function startSock(sessionId) {
   return sock;
 }
 
-// ---- Express server
 const app = express();
 app.use(express.json());
 
@@ -392,7 +373,7 @@ app.post("/send-message", async (req, res) => {
     
     saveQueue();
     
-    console.log(`[queue] 📥 Added message for ${normalizedPhone}. Queue length: ${messageQueue.length}`);
+    console.log(`[queue] Added message for ${normalizedPhone}. Queue length: ${messageQueue.length}`);
     res.json({ status: "queued", phone: normalizedPhone, queuePosition: messageQueue.length });
     
   } catch (err) {
@@ -437,13 +418,12 @@ app.post("/unpause/:phone", (req, res) => {
   if (pauseUntil[phone]) {
     delete pauseUntil[phone];
     savePauseFile();
-    res.json({ message: `▶️  Unpaused bot for ${phone}` });
+    res.json({ message: `Unpaused bot for ${phone}` });
   } else {
     res.json({ message: `Bot was not paused for ${phone}` });
   }
 });
 
-// ---- Queue Processor
 setInterval(async () => {
   if (!messageQueue.length) return;
 
@@ -451,28 +431,25 @@ setInterval(async () => {
   const { sessionId, phone, text, imageUrl, retries = 0 } = item;
   const now = Date.now();
 
-  // Check if paused
   if (pauseUntil[phone] && pauseUntil[phone] > now) {
-    console.log(`[queue] ⏸️  Skipping ${phone}, paused until ${new Date(pauseUntil[phone]).toISOString()}`);
+    console.log(`[queue] Skipping ${phone}, paused until ${new Date(pauseUntil[phone]).toISOString()}`);
     return;
   }
 
-  // Remove from queue
   messageQueue.shift();
   saveQueue();
 
   const sock = sessions[sessionId];
   
   if (!sock) {
-    console.error(`[queue] ❌ No active session for ${sessionId}`);
+    console.error(`[queue] No active session for ${sessionId}`);
     messageStatus[phone] = { status: "no_session", timestamp: now };
     
-    // Retry if under limit
     if (retries < MAX_RETRIES) {
       item.retries = retries + 1;
       messageQueue.push(item);
       saveQueue();
-      console.log(`[queue] 🔄 Re-queued message for ${phone} (retry ${item.retries}/${MAX_RETRIES})`);
+      console.log(`[queue] Re-queued message for ${phone} (retry ${item.retries}/${MAX_RETRIES})`);
     }
     return;
   }
@@ -489,13 +466,12 @@ setInterval(async () => {
       });
       const buffer = Buffer.from(response.data, "binary");
       sentMsg = await sock.sendMessage(jid, { image: buffer, caption: text || "" });
-      console.log(`[queue] 📸 Sent image to ${jid}`);
+      console.log(`[queue] Sent image to ${jid}`);
     } else {
       sentMsg = await sock.sendMessage(jid, { text: text || " " });
-      console.log(`[queue] 💬 Sent text to ${jid}`);
+      console.log(`[queue] Sent text to ${jid}`);
     }
     
-    // ⭐ تسجيل الـ message ID عشان نعرف إنها من API
     if (sentMsg?.key?.id) {
       sentMessageIds.add(sentMsg.key.id);
     }
@@ -503,12 +479,37 @@ setInterval(async () => {
     messageStatus[phone] = { status: "sent", timestamp: now };
     
   } catch (err) {
-    console.error(`[queue] ❌ Error sending to ${jid}:`, err?.message || err);
+    console.error(`[queue] Error sending to ${jid}:`, err?.message || err);
     messageStatus[phone] = { status: "error", timestamp: now, error: err.message };
     
-    // Retry if under limit
     if (retries < MAX_RETRIES) {
       item.retries = retries + 1;
       messageQueue.push(item);
       saveQueue();
-      console.log(`[queue] �
+      console.log(`[queue] Re-queued message for ${phone} (retry ${item.retries}/${MAX_RETRIES})`);
+    }
+  }
+}, 2000);
+
+const sessionFolders = fs.existsSync(AUTH_DIR) 
+  ? fs.readdirSync(AUTH_DIR).filter(x => fs.statSync(path.join(AUTH_DIR, x)).isDirectory()) 
+  : [];
+
+console.log(`[${PROJECT_NAME}] Found ${sessionFolders.length} session(s) to reconnect.`);
+sessionFolders.forEach(sessionId => startSock(sessionId).catch(console.error));
+
+process.on("SIGINT", () => {
+  console.log(`[${PROJECT_NAME}] Shutting down gracefully...`);
+  saveQueue();
+  savePauseFile();
+  process.exit(0);
+});
+
+process.on("SIGTERM", () => {
+  console.log(`[${PROJECT_NAME}] Shutting down gracefully...`);
+  saveQueue();
+  savePauseFile();
+  process.exit(0);
+});
+
+app.listen(PORT, () => console.log(`[${PROJECT_NAME}] Server running on port ${PORT}`));
