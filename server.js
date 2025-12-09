@@ -47,9 +47,8 @@ async function startSock(sessionId) {
    const sock = makeWASocket({
       printQRInTerminal: false,
       auth: state,
-// 👇 التغيير ده هو اللي هيحل المشكلة
-      browser: ["Windows", "Chrome", "10.0"],
-
+// محاكاة متصفح كروم حديث على ويندوز
+      browser: ["Windows", "Chrome", "119.0.6045.105"],
       // منع مزامنة التاريخ بالكامل
       shouldSyncHistoryMessage: () => false,
       syncFullHistory: false,
@@ -104,19 +103,19 @@ sock.ev.on("connection.update", async (update) => {
 
           // 👇👇👇 التحسين الجذري هنا 👇👇👇
           // إذا كان الخطأ "Connection Failure" أو "Unauthorized" (401)
-          if (statusCode === DisconnectReason.loggedOut || statusCode === 401 || errorMsg.includes("connection failure")) {
-              console.log(`⚠️ Critical Error for ${sessionId}. Deleting corrupted session files and restarting...`);
+         // إذا كان الخطأ "Connection Failure" أو 405 (Method Not Allowed) أو 401
+          if (statusCode === DisconnectReason.loggedOut || statusCode === 401 || statusCode === 405 || errorMsg.includes("connection failure")) {
+              console.log(`⚠️ Critical Error (${statusCode}) for ${sessionId}. Waiting 5s before restart...`);
+              
               if (fs.existsSync(authFolder)) {
                   fs.rmSync(authFolder, { recursive: true, force: true });
               }
-              // إعادة التشغيل فوراً لطلب QR جديد
-              startSock(sessionId); 
-          } else {
-              // إعادة اتصال عادية (للإنترنت الضعيف)
-              console.log(`🔁 Reconnecting session: ${sessionId}`);
-              setTimeout(() => startSock(sessionId).catch(console.error), 3000);
+              
+              // 👇 الانتظار هنا هو الحل السحري لفك التعليق
+              setTimeout(() => {
+                  startSock(sessionId); 
+              }, 5000); 
           }
-        }
 
       } catch (e) {
         console.error(`Error in connection.update handler for ${sessionId}:`, e?.message || e);
