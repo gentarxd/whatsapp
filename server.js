@@ -78,7 +78,7 @@ async function startSock(sessionId) {
   const sock = makeWASocket({
     printQRInTerminal: false,
     auth: state,
-    browser: ["Chrome", "Windows", "103.0.0"],
+    browser: ["Ubuntu", "Chrome", "20.0.04"],
     shouldSyncHistoryMessage: () => false,
     syncFullHistory: false,
   });
