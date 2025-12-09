@@ -45,7 +45,7 @@ async function startSock(sessionId) {
   const sock = makeWASocket({
     printQRInTerminal: false,
     auth: state,
-    logger: null,
+    logger: P({ level: "silent" })
     browser:["Ubuntu", "Chrome", "20.0.04"],
     connectTimeoutMs: 60000,
     keepAliveIntervalMs: 10000,
