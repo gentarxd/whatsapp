@@ -68,57 +68,61 @@ async function startSock(sessionId) {
     // حفظ الكريدينشالز
     sock.ev.on("creds.update", saveCreds);
 
-  sock.ev.on("connection.update", (update) => {
-  try {
-    const { connection, qr } = update;
+sock.ev.on("connection.update", async (update) => {
+      try {
+        const { connection, qr, lastDisconnect } = update;
 
-    // Initialize attempt counter
-    if (!qrGenerationAttempts[sessionId]) qrGenerationAttempts[sessionId] = 0;
+        if (!qrGenerationAttempts[sessionId]) qrGenerationAttempts[sessionId] = 0;
 
-    if (qr) {
-      // Count QR generation attempts
-      qrGenerationAttempts[sessionId]++;
+        if (qr) {
+          qrGenerationAttempts[sessionId]++;
+          if (qrGenerationAttempts[sessionId] > 5) {
+            console.warn(`⚠️ QR generation limit reached for ${sessionId}.`);
+            sessionStatus[sessionId] = "qr_limit_reached";
+            return; 
+          }
+          qrCodes[sessionId] = qr;
+          sessionStatus[sessionId] = "qr";
+          console.log(`QR generated for ${sessionId} (Attempt ${qrGenerationAttempts[sessionId]}/5)`);
+        }
 
-      if (qrGenerationAttempts[sessionId] > 5) {
-        console.warn(`⚠️ QR generation limit reached for ${sessionId}. No more QR will be generated.`);
-        sessionStatus[sessionId] = "qr_limit_reached";
-        return; // Stop generating new QR
+        if (connection === "open") {
+          sessionStatus[sessionId] = "open";
+          console.log(`✅ Session ${sessionId} connected`);
+          delete qrCodes[sessionId];
+          qrGenerationAttempts[sessionId] = 0; 
+        }
+
+        if (connection === "close") {
+          sessionStatus[sessionId] = "close";
+          clearInterval(pingInterval);
+          delete sessions[sessionId];
+
+          const statusCode = (lastDisconnect?.error)?.output?.statusCode;
+          const errorMsg = (lastDisconnect?.error?.message || "").toLowerCase();
+
+          console.log(`❌ Session ${sessionId} closed. Status: ${statusCode}, Error: ${errorMsg}`);
+
+          // 👇👇👇 التحسين الجذري هنا 👇👇👇
+          // إذا كان الخطأ "Connection Failure" أو "Unauthorized" (401)
+          if (statusCode === DisconnectReason.loggedOut || statusCode === 401 || errorMsg.includes("connection failure")) {
+              console.log(`⚠️ Critical Error for ${sessionId}. Deleting corrupted session files and restarting...`);
+              if (fs.existsSync(authFolder)) {
+                  fs.rmSync(authFolder, { recursive: true, force: true });
+              }
+              // إعادة التشغيل فوراً لطلب QR جديد
+              startSock(sessionId); 
+          } else {
+              // إعادة اتصال عادية (للإنترنت الضعيف)
+              console.log(`🔁 Reconnecting session: ${sessionId}`);
+              setTimeout(() => startSock(sessionId).catch(console.error), 3000);
+          }
+        }
+
+      } catch (e) {
+        console.error(`Error in connection.update handler for ${sessionId}:`, e?.message || e);
       }
-
-      qrCodes[sessionId] = qr;
-      sessionStatus[sessionId] = "qr";
-      console.log(`QR generated for ${sessionId} (Attempt ${qrGenerationAttempts[sessionId]}/5)`);
-    }
-
-    if (connection === "open") {
-      sessionStatus[sessionId] = "open";
-      console.log(`✅ Session ${sessionId} connected`);
-      delete qrCodes[sessionId];
-      qrGenerationAttempts[sessionId] = 0; // Reset attempts after successful connect
-    }
-
-  if (connection === "close") {
-  sessionStatus[sessionId] = "close";
-  console.log(`❌ Session ${sessionId} closed — reconnecting in 3s...`);
-  clearInterval(pingInterval);
-  delete sessions[sessionId];
-
-  // لو الجلسة كانت لسه متربطة (pairing done) نعمل reconnect تلقائي بعد 3 ثواني
-  setTimeout(async () => {
-    try {
-      console.log(`🔁 Reconnecting session: ${sessionId}`);
-      await startSock(sessionId);
-    } catch (err) {
-      console.error(`Reconnect failed for ${sessionId}:`, err?.message || err);
-    }
-  }, 3000);
-}
-
-
-  } catch (e) {
-    console.error(`Error in connection.update handler for ${sessionId}:`, e?.message || e);
-  }
-});
+    });
 
 
     // LISTENER للرسائل الجديدة
