@@ -5,7 +5,9 @@ import fs from "fs";
 import QRCode from "qrcode";
 import { downloadMediaMessage } from "@whiskeysockets/baileys";
 import FormData from "form-data";
+import P from 'pino'; // ✅ 1. تم إضافة مكتبة Pino لمنع الانهيار
 
+// تأكد من وجود مجلد التحميلات
 if (!fs.existsSync("./downloads")) {
   fs.mkdirSync("./downloads", { recursive: true });
 }
@@ -13,18 +15,22 @@ if (!fs.existsSync("./downloads")) {
 const app = express();
 app.use(express.json());
 
+// المتغيرات الأساسية
 const sessions = {};
 const qrCodes = {};
 const sessionStatus = {};
-const reconnectAttempts = {};
 const qrGenerationAttempts = {};
 const PORT = process.env.PORT || 3000;
 
-let preferredSessionId = process.env.PREFERRED_SESSION || null; // ex: "P1WM"
-const AUTH_DIR = '/data/auth_info';
+// ✅ 2. متغيرات الإيقاف المؤقت (Pause Logic)
+const pausedNumbers = {}; 
+const PAUSE_DURATION_MS = 60 * 60 * 1000; // ساعة واحدة
+
+let preferredSessionId = process.env.PREFERRED_SESSION || null; 
+const AUTH_DIR = './data/auth_info'; // تم تعديل المسار ليكون Relative لضمان العمل
 
 const messageQueue = [];
-const messageStatus = {}; // { phone: "queued" | "sent" | "error" | "no_session" }
+const messageStatus = {}; 
 
 // =======================
 // Start WhatsApp Socket
@@ -40,20 +46,23 @@ async function startSock(sessionId) {
 
     const authFolder = `${AUTH_DIR}/${sessionId}`;
     if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
-    if (!fs.existsSync(authFolder)) fs.mkdirSync(authFolder, { recursive: true });
+    
+    // تنظيف المجلد إذا كانت الجلسة غير موجودة في الذاكرة لضمان بداية نظيفة
+    if (!sessions[sessionId] && !fs.existsSync(authFolder)) {
+        fs.mkdirSync(authFolder, { recursive: true });
+    }
 
     const { state, saveCreds } = await useMultiFileAuthState(authFolder);
 
-   const sock = makeWASocket({
+    const sock = makeWASocket({
       printQRInTerminal: false,
       auth: state,
-// محاكاة متصفح كروم حديث على ويندوز
+      // ✅ 3. استخدام Pino Logger (Silent) + متصفح ويندوز (Fix 405)
+      logger: P({ level: "silent" }),
       browser: ["Windows", "Chrome", "119.0.6045.105"],
-      // منع مزامنة التاريخ بالكامل
       shouldSyncHistoryMessage: () => false,
       syncFullHistory: false,
     });
-
 
     // Keep-Alive Ping
     const pingInterval = setInterval(() => {
@@ -63,10 +72,9 @@ async function startSock(sessionId) {
       }
     }, 60 * 1000);
 
-    // حفظ الكريدينشالز
     sock.ev.on("creds.update", saveCreds);
 
-sock.ev.on("connection.update", async (update) => {
+    sock.ev.on("connection.update", async (update) => {
       try {
         const { connection, qr, lastDisconnect } = update;
 
@@ -101,9 +109,7 @@ sock.ev.on("connection.update", async (update) => {
 
           console.log(`❌ Session ${sessionId} closed. Status: ${statusCode}, Error: ${errorMsg}`);
 
-          // 👇👇👇 التحسين الجذري هنا 👇👇👇
-          // إذا كان الخطأ "Connection Failure" أو "Unauthorized" (401)
-         // إذا كان الخطأ "Connection Failure" أو 405 (Method Not Allowed) أو 401
+          // ✅ 4. معالجة الأخطاء الحرجة (401, 405, Connection Failure)
           if (statusCode === DisconnectReason.loggedOut || statusCode === 401 || statusCode === 405 || errorMsg.includes("connection failure")) {
               console.log(`⚠️ Critical Error (${statusCode}) for ${sessionId}. Waiting 5s before restart...`);
               
@@ -111,11 +117,17 @@ sock.ev.on("connection.update", async (update) => {
                   fs.rmSync(authFolder, { recursive: true, force: true });
               }
               
-              // 👇 الانتظار هنا هو الحل السحري لفك التعليق
+              // إعادة المحاولة بعد 5 ثواني
               setTimeout(() => {
                   startSock(sessionId); 
               }, 5000); 
+          } else {
+              // إعادة اتصال سريعة للأخطاء العادية
+              setTimeout(() => {
+                  startSock(sessionId).catch(e => console.error("Reconnect failed:", e));
+              }, 3000);
           }
+        }
 
       } catch (e) {
         console.error(`Error in connection.update handler for ${sessionId}:`, e?.message || e);
@@ -123,14 +135,39 @@ sock.ev.on("connection.update", async (update) => {
     });
 
 
-    // LISTENER للرسائل الجديدة
+    // ✅ 5. LISTENER معدل (يحتوي على منطق الإيقاف)
     sock.ev.on("messages.upsert", async (m) => {
       try {
         const msg = m.messages[0];
-        if (!msg.message || msg.key.fromMe) return;
+        if (!msg.message) return;
 
         const from = msg.key.remoteJid;
-        const senderPn = from.split("@")[0];
+        const senderPn = from ? from.split("@")[0] : "";
+        
+        // --- بداية منطق الإيقاف (Pause Logic) ---
+        if (msg.key.fromMe) {
+            // هل قمت بعمل Reply؟
+            const isReply = msg.message.extendedTextMessage?.contextInfo?.quotedMessage;
+            if (isReply) {
+                const unpauseTime = Date.now() + PAUSE_DURATION_MS;
+                pausedNumbers[senderPn] = unpauseTime;
+                console.log(`[HUMAN INTERVENTION] You replied to ${senderPn}. Bot paused for 1 hour.`);
+            }
+            return; 
+        }
+
+        // هل الرقم موقوف؟
+        if (pausedNumbers[senderPn]) {
+            if (Date.now() < pausedNumbers[senderPn]) {
+                console.log(`[PAUSED] Ignoring message from ${senderPn} because you replied recently.`);
+                return; 
+            } else {
+                delete pausedNumbers[senderPn];
+                console.log(`[RESUME] Bot active again for ${senderPn}`);
+            }
+        }
+        // --- نهاية منطق الإيقاف ---
+
         const type = Object.keys(msg.message)[0];
         const session = sessionId;
 
@@ -192,7 +229,7 @@ sock.ev.on("connection.update", async (update) => {
         }
 
         await axios.post(
-        "https://n8n.gentar.cloud/webhook/909d7c73-112a-455b-988c-9f770852c8fa",
+          "https://n8n.gentar.cloud/webhook/909d7c73-112a-455b-988c-9f770852c8fa",
           form,
           { headers: form.getHeaders(), timeout: 20000 }
         );
@@ -214,43 +251,33 @@ sock.ev.on("connection.update", async (update) => {
 // =======================
 // Routes
 // =======================
-// =======================
-// Create Group Route
-// =======================
+
 app.post("/create-group", async (req, res) => {
   try {
     const { sessionId, groupName, participants } = req.body;
 
-    // 1. التحقق من البيانات المطلوبة
     if (!sessionId || !groupName || !Array.isArray(participants) || participants.length === 0) {
       return res.status(400).json({ error: "sessionId, groupName, and participants (array) are required" });
     }
 
-    // 2. التأكد من وجود الجلسة
     const sock = sessions[sessionId];
     if (!sock) {
       return res.status(404).json({ error: "session not found" });
     }
 
-    // 3. تحويل الأرقام لصيغة JID
-    // بنفترض إنك بتبعت الأرقام كـ strings عادية (مثال: "2010xxxx") زي ما بتعمل في /check
     const pJids = participants.map(phone => `${phone}@s.whatsapp.net`);
 
-    // 4. إنشاء الجروب
     console.log(`Creating group '${groupName}' for session ${sessionId} with ${pJids.length} members...`);
     const group = await sock.groupCreate(groupName, pJids);
     
-    // group object بيرجع فيه id و participants
     console.log(`✅ Group created! ID: ${group.id}`);
-
-    // (اختياري) إرسال رسالة ترحيب أول ما الجروب يتعمل
     await sock.sendMessage(group.id, { text: `Welcome to ${groupName}!` });
 
     res.json({ 
       status: "success", 
       groupId: group.id, 
       groupName: groupName,
-      participants: group.participants // بيرجعلك مين انضاف ومين لا (لو فيه privacy settings)
+      participants: group.participants 
     });
 
   } catch (err) {
@@ -258,6 +285,7 @@ app.post("/create-group", async (req, res) => {
     res.status(500).json({ error: "failed to create group" });
   }
 });
+
 app.post("/check", async (req, res) => {
   try {
     const { sessionId, numbers } = req.body;
@@ -299,14 +327,15 @@ app.post("/link-number", async (req, res) => {
 
     const { state, saveCreds } = await useMultiFileAuthState(authFolder);
 
-   const sock = makeWASocket({
-  printQRInTerminal: false,
-  auth: state,
-
-  // منع مزامنة التاريخ بالكامل
-  shouldSyncHistoryMessage: () => false,
-  syncFullHistory: false,
-});
+    const sock = makeWASocket({
+      printQRInTerminal: false,
+      auth: state,
+      // Pino + Windows Fix
+      logger: P({ level: "silent" }),
+      browser: ["Windows", "Chrome", "119.0.6045.105"],
+      shouldSyncHistoryMessage: () => false,
+      syncFullHistory: false,
+    });
 
 
     sock.ev.on("creds.update", saveCreds);
@@ -388,7 +417,7 @@ app.post("/send-message", async (req, res) => {
 });
 
 // =======================
-// Message Queue Processor (Modified for Groups)
+// Message Queue Processor
 // =======================
 setInterval(async () => {
   if (messageQueue.length === 0) return;
@@ -402,13 +431,10 @@ setInterval(async () => {
     return;
   }
 
-  // التعديل هنا: تحديد نوع الـ JID بذكاء
   let jid;
   if (phone.includes('@')) {
-    // لو المبعوت فيه @ يبقى ده JID جاهز (سواء جروب أو شخص)
     jid = phone; 
   } else {
-    // لو أرقام بس، يبقى ده رقم شخصي ونضيفله الامتداد
     jid = `${phone}@s.whatsapp.net`;
   }
 
@@ -453,6 +479,7 @@ setInterval(async () => {
     messageStatus[phone] = "error";
   }
 }, 2000);
+
 app.get("/message-status", (req, res) => {
   try { res.json(messageStatus); }
   catch (err) { console.error("/message-status error:", err?.message || err); res.status(500).json({ error: "failed to get message status" }); }
