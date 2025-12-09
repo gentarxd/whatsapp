@@ -7,6 +7,7 @@ import FormData from "form-data";
 import path from "path";
 import process from "process";
 import { fileURLToPath } from 'url';
+import P from 'pino';
 
 // ---- Config
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
