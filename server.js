@@ -47,10 +47,8 @@ async function startSock(sessionId) {
    const sock = makeWASocket({
       printQRInTerminal: false,
       auth: state,
-      
-      // 👇 ضيف السطر ده هنا
-    // تحديث نسخة الأوبنتو
-browser: ["Ubuntu", "Chrome", "22.04.0"],
+// 👇 التغيير ده هو اللي هيحل المشكلة
+      browser: ["Windows", "Chrome", "10.0"],
 
       // منع مزامنة التاريخ بالكامل
       shouldSyncHistoryMessage: () => false,
