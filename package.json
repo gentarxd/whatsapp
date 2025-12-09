@@ -1,8 +1,9 @@
 {
   "name": "whatsapp-bot",
   "version": "1.0.0",
-  "description": "WhatsApp bot with per-user human-override pause feature (production-ready starter)",
+  "description": "WhatsApp bot",
   "main": "server.js",
+  "type": "module", 
   "scripts": {
     "start": "node server.js"
   },
