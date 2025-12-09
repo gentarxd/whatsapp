@@ -14,8 +14,6 @@ const AUTH_DIR = process.env.AUTH_DIR || "./data/auth_info";
 const DATA_DIR = "./data";
 const WEBHOOK_URL = process.env.WEBHOOK_URL || "https://n8n.gentar.cloud/webhook/909d7c73-112a-455b-988c-9f770852c8fa";
 const PAUSE_MINUTES = parseInt(process.env.PAUSE_MINUTES || "60", 10);
-let retryCount = 0;
-const MAX_RETRIES = 3;
 
 // ---- Ensure folders
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -80,7 +78,7 @@ async function startSock(sessionId) {
   const sock = makeWASocket({
     printQRInTerminal: false,
     auth: state,
-    browser: ["Chrome", "Windows", "10"],
+    browser: ["Chrome", "Windows", "103.0.0"],
     shouldSyncHistoryMessage: () => false,
     syncFullHistory: false,
   });
@@ -106,20 +104,12 @@ async function startSock(sessionId) {
       console.log(`[${PROJECT_NAME}] Session ${sessionId} open`);
     }
     if (connection === "close") {
-    const lastDisconnect = update.lastDisconnect;
-    const reason = lastDisconnect?.error?.output?.statusCode;
-
-    console.log(`[${PROJECT_NAME}] Session ${sessionId} closed`);
-
-    if (retryCount < MAX_RETRIES) {
-        retryCount++;
-        console.log(`[${PROJECT_NAME}] Reconnecting attempt ${retryCount}/${MAX_RETRIES} in 3s...`);
-        setTimeout(() => startSock(sessionId), 3000);
-    } else {
-        console.log(`[${PROJECT_NAME}] ❌ Max reconnect attempts reached for ${sessionId}. Stopping.`);
+      sessionStatus[sessionId] = "close";
+      clearInterval(pingInterval);
+      delete sessions[sessionId];
+      console.log(`[${PROJECT_NAME}] Session ${sessionId} closed — reconnecting in 3s...`);
+      setTimeout(() => startSock(sessionId).catch(console.error), 3000);
     }
-}
-
   });
 
 // ---- Listen for incoming messages
@@ -130,10 +120,11 @@ sock.ev.on("messages.upsert", async (m) => {
     const fromMe = !!msg.key.fromMe;
     let from, senderPN;
 
+    const BOT_NUMBER = "97433502059"; // ضع هنا رقم البوت بدون @s.whatsapp.net
+
     if (fromMe) {
         // البوت أرسل الرسالة → from = المستقبل (العميل)، senderPN = البوت
-        senderPN = msg.key.remoteJid?.split("@")[0];
-
+        senderPN = BOT_NUMBER;
 
         // لو الرسالة reply، ناخد الرقم الأصلي للعميل من contextInfo.participant
         const isReply = !!msg.message?.extendedTextMessage?.contextInfo;
@@ -154,8 +145,6 @@ sock.ev.on("messages.upsert", async (m) => {
 
     // نظام الـ pause
     const cleanFrom = (from || "").split("@")[0];
-  if (cleanFrom === senderPN && fromMe) return; // منع Loop
-
 if (pauseUntil[cleanFrom] && Date.now() < pauseUntil[cleanFrom]) {
     console.log(`[whatsapp-bot] Bot paused for ${cleanFrom}`);
     return;
